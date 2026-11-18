@@ -183,6 +183,63 @@ h1 .dim, .dim { color: var(--fg-3); }
 .lesson-steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 .lesson-steps li::marker { color: var(--fg-3); font-variant-numeric: tabular-nums; }
 
+/* voice settings */
+.voice-panel { display: grid; gap: 12px; margin-bottom: 14px; }
+.voice-panel .seg { justify-self: start; }
+.field { display: grid; gap: 6px; font-size: 13px; color: var(--fg-2); }
+.field select, .field input {
+  width: 100%; padding: 10px 12px; border-radius: 12px; font: inherit; font-size: 15px; color: var(--fg);
+  background: rgba(255,255,255,0.06); border: 1px solid var(--stroke);
+}
+.row-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.sheet-note.small { font-size: 12px; color: var(--fg-3); }
+.link-btn { display: inline-flex; gap: 4px; align-items: center; }
+
+/* film study */
+.film-card { display: grid; gap: 10px; }
+.film-card .row-btns .mini { padding: 9px 14px; font-size: 14px; }
+.film-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.film-status { margin: 0; font-size: 13px; color: var(--fg-2); }
+
+/* fight breakdown */
+.f0 { color: #b9d4ff; }
+.f1 { color: #ffcf70; }
+.name-in {
+  width: 52%; min-width: 0; padding: 8px 10px; border-radius: 10px; font: inherit; font-size: 15px; color: var(--fg);
+  background: rgba(255,255,255,0.06); border: 1px solid var(--stroke); text-align: right;
+}
+label.btn { cursor: pointer; }
+.bd-player { padding: 10px; display: grid; gap: 10px; }
+.bd-stage { position: relative; border-radius: 12px; overflow: hidden; background: #000; }
+.bd-stage video { display: block; width: 100%; max-height: 60vh; }
+.bd-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.bd-progress { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--fg-2); }
+.bd-progress .bar { grid-column: 1 / -1; }
+.bd-timeline { position: relative; height: 28px; border-radius: 8px; background: rgba(255,255,255,0.05); overflow: hidden; }
+.bd-ex { position: absolute; top: 0; bottom: 0; border: 0; padding: 0; background: rgba(255,255,255,0.10); cursor: pointer; min-width: 6px; }
+.bd-ex:hover, .bd-ex:focus-visible { background: rgba(255,255,255,0.22); }
+.bd-dot { position: absolute; width: 3px; height: 10px; border-radius: 2px; pointer-events: none; transform: translateX(-1px); }
+.bd-dot.f0 { top: 3px; background: #b9d4ff; }
+.bd-dot.f1 { bottom: 3px; background: #ffcf70; }
+.bd-legend { display: flex; gap: 16px; font-size: 13px; font-weight: 600; }
+.bd-legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: currentColor; margin-right: 6px; }
+.bd-results { display: flex; flex-direction: column; gap: 14px; }
+.bd-fighters { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.bd-fighter .card-title { font-size: 15px; color: inherit; }
+.bd-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.bd-stats .v { color: var(--fg); }
+.section-title { margin: 8px 2px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
+.bd-card { display: grid; gap: 10px; }
+.bd-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.bd-when { margin: 0; font-size: 12px; color: var(--fg-3); }
+.bd-title { margin: 2px 0 0; font-weight: 600; }
+.bd-seq { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.bd-seq li { font-size: 13px; font-weight: 600; padding: 4px 9px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid currentColor; }
+.bd-notes { margin: 0; padding-left: 18px; display: grid; gap: 5px; color: var(--fg-2); font-size: 14px; }
+.bd-notes b { font-weight: 600; }
+.bd-notes .n-counter::marker { color: var(--good); }
+.bd-notes .n-setup::marker { color: var(--accent); }
+
 /* lessons empty state */
 .empty {
   display: grid; justify-items: center; gap: 8px; text-align: center; padding: 48px 16px;
@@ -195,7 +252,7 @@ h1 .dim, .dim { color: var(--fg-3); }
 /* ---------------------------------------------------------------- tab bar */
 .tabbar {
   position: fixed; z-index: 5; left: 0; right: 0; bottom: 0;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   padding: 8px max(10px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 8px) max(10px, env(safe-area-inset-left, 0px));
   background: rgba(8, 9, 11, 0.72);
   border-top: 1px solid var(--stroke);

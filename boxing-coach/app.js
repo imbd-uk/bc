@@ -10,6 +10,8 @@ import {
 } from './personal.js';
 import { startPlexus } from './plexus.js';
 import { initLessons } from './lessons.js';
+import { initBreakdown } from './breakdown.js';
+import { voice, buildVoicePanel } from './voice.js';
 
 const CFG = {
   COMBO_GAP: 1.2, ENCOURAGE_EVERY: 5, VOICE_COOLDOWN: 1.6, REST_S: 60,
@@ -49,6 +51,7 @@ const el = {
   teachCenter: $('teach-center'), teachMsg: $('teach-msg'),
   btnUndo: $('btn-undo'), btnSkip: $('btn-skip'), btnFinish: $('btn-finish'),
   btnTeach: $('btn-teach'), btnClear: $('btn-clear'), punchList: $('punch-list'), comboList: $('combo-list'),
+  btnVoiceSettings: $('btn-voice-settings'), voiceName: $('voice-name'),
   stanceNow: $('stance-now'), stanceSeg: $('stance-seg'), stanceSub: $('stance-sub'),
   scoreCard: $('score-card'), scoreNum: $('score-num'), scoreNote: $('score-note'),
   sheet: $('sheet'), sheetTitle: $('sheet-title'), sheetBody: $('sheet-body'), sheetClose: $('btn-sheet-close'),
@@ -72,8 +75,8 @@ document.querySelectorAll('.seg[data-setting]').forEach((seg) => {
 });
 
 // ---------------------------------------------------------------- pages
-const PAGES = ['analyse', 'teach', 'tips', 'lessons'];
-let lessons = null;
+const PAGES = ['analyse', 'teach', 'fights', 'tips', 'lessons'];
+let lessons = null, fights = null;
 function route() {
   const [first, sub] = location.hash.slice(1).split('/');
   const page = PAGES.includes(first) ? first : 'analyse';
@@ -82,6 +85,7 @@ function route() {
     if (a.dataset.tab === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   if (lessons) { if (page === 'lessons') lessons.show(sub); else lessons.hide(); }
+  if (fights && page !== 'fights') fights.hide();
   window.scrollTo(0, 0);
 }
 addEventListener('hashchange', route);
@@ -101,6 +105,7 @@ lessons = initLessons({
   getLead: () => personal.stance?.lead || null,
   onPractise: (label, reps) => startTrain({ label, target: reps }),
 });
+fights = initBreakdown({ root: $('page-fights') });
 route();
 
 const ready = (async () => {
@@ -748,7 +753,7 @@ function stopStage() {
   el.cam.pause();
   if (el.cam.getAttribute('src')) { URL.revokeObjectURL(el.cam.src); el.cam.removeAttribute('src'); el.cam.load(); }
   releaseWakeLock();
-  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  voice.stop();
   el.stage.hidden = true;
   document.body.style.overflow = '';
   plexus.resume();
@@ -847,24 +852,37 @@ function setVoiceButton() {
   el.btnVoice.setAttribute('aria-pressed', String(voiceOn));
 }
 function speak(text, t) {
-  if (!voiceOn || !('speechSynthesis' in window)) return;
+  if (!voiceOn) return;
   if (t - S.lastVoiceT < CFG.VOICE_COOLDOWN) return;
   S.lastVoiceT = t; speakNow(text);
 }
 function speakNow(text) {
-  if (!voiceOn || !('speechSynthesis' in window)) return;
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; u.lang = 'en-GB';
-  speechSynthesis.speak(u);
+  if (!voiceOn) return;
+  voice.say(text, { live: true });
 }
 let audioCtx = null;
 function unlockAudio() {
   try {
-    if ('speechSynthesis' in window) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); }
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    voice.unlock();
+    audioCtx = audioCtx || voice.context();
     audioCtx.resume();
   } catch { /* sound is optional */ }
 }
+
+// Every fixed line the coach can say, so ElevenLabs can cache them in one go.
+function coachPhrases() {
+  const out = [...Object.values(CALLS).flat(), ...ENCOURAGE, 'Rest', 'Get in your stance and hold your guard.'];
+  for (let n = 2; n <= 12; n++) out.push(`Round ${n}. Box`);
+  for (let n = 3; n <= 8; n++) out.push(`${n} punch combo`);
+  for (const cb of COMBOS) out.push(cb.name);
+  for (const l of LABELS) out.push(`That was a ${lower(l)}`);
+  return out;
+}
+el.btnVoiceSettings.addEventListener('click', () => {
+  openSheet('Voice', buildVoicePanel({ phrases: coachPhrases() }), () => refreshVoiceRow());
+});
+function refreshVoiceRow() { el.voiceName.textContent = voice.chatter ? 'Chatterbox (PC)' : voice.natural ? 'Natural (AI)' : 'Phone voice'; }
+refreshVoiceRow();
 function tone(freq, start, dur, vol, type = 'sine') {
   if (!audioCtx) return;
   const o = audioCtx.createOscillator(), g = audioCtx.createGain();
@@ -897,7 +915,7 @@ el.file.addEventListener('change', () => { const f = el.file.files[0]; el.file.v
 el.btnEnd.addEventListener('click', endTrain);
 el.btnVoice.addEventListener('click', () => {
   voiceOn = !voiceOn;
-  if (!voiceOn && 'speechSynthesis' in window) speechSynthesis.cancel();
+  if (!voiceOn) voice.stop();
   setVoiceButton();
 });
 el.btnFlip.addEventListener('click', async () => {
@@ -936,6 +954,7 @@ window.boxingCoach = {
   finish() { running = true; return mode === 'teach' ? finishTeach() : endTrain(); },
   get personal() { return personal; },
   get engine() { return engine; },
+  get fights() { return fights; },
   rebuild() { rebuildPersonal(); refreshModelUI(); },
   get evalResult() { return evalResult; },
 };

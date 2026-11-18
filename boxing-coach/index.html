@@ -60,6 +60,10 @@
           <button type="button" role="radio" data-value="off">Off</button>
         </div>
       </div>
+      <div class="row">
+        <span class="row-label">Voice</span>
+        <button id="btn-voice-settings" class="mini link-btn" type="button"><span id="voice-name">Natural (AI)</span> ›</button>
+      </div>
       <div class="row" id="row-model" hidden>
         <span class="row-label" id="lbl-model">Model</span>
         <div class="seg" role="radiogroup" aria-labelledby="lbl-model" data-setting="model">
@@ -178,6 +182,9 @@
 
   <!-- LESSONS -->
   <section class="page" id="page-lessons" data-page="lessons" hidden></section>
+
+  <!-- FIGHT BREAKDOWN -->
+  <section class="page" id="page-fights" data-page="fights" hidden></section>
 </div>
 
 <!-- Tab bar -->
@@ -189,6 +196,10 @@
   <a href="#teach" data-tab="teach">
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="7" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="13" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6.7 8.1l3.7 3.6M17.4 7.3l-4 4.3M10.4 14.2l-3 2.6M13.6 14.2l3 2.6"/></svg>
     <span>Teach</span>
+  </a>
+  <a href="#fights" data-tab="fights">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z"/></svg>
+    <span>Fights</span>
   </a>
   <a href="#tips" data-tab="tips">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/></svg>

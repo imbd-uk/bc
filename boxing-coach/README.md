@@ -48,6 +48,22 @@ The app has four pages, switched with the tab bar at the bottom:
   them on the phone and shows a self-test score. Redo any punch or combo it gets wrong.
   Once each punch has 5+ examples, Analyse uses **your model**, which also uses which hand
   moved (lead or rear) and your taught combos to call fast punches, and says the combo name.
+- **Fights**: upload a clip of two fighters (e.g. a pro fight). It tracks both fighters,
+  calls each punch (type, lead/rear, head/body), splits the clip into exchanges and writes up
+  who led, the setups (jab into the cross, double jab, body-to-head…), the counters and who had
+  the last word, plus each fighter's output, punch mix and go-to combination. Tap an
+  exchange to replay it at half speed with both skeletons and punch labels drawn on top.
+  **AI film study** plays the clip like a coach's video breakdown: it slows into each key moment,
+  freezes, spotlights the fighter, draws rings, arrows and range lines, and talks through the
+  positioning, setup, counter and exit. **Save as video** records it (with voice-over) to an
+  .mp4/.webm file.
+- **Voice** (Analyse page):
+  - *Chatterbox (PC)*: Resemble AI's open-source Chatterbox running on a PC's NVIDIA GPU via a
+    small local server (separate `chatterbox-server` folder, not part of this repo). Studio quality,
+    free, unlimited, voice cloning from a 10–20 s sample. Works when the app is opened on that PC.
+  - *Natural (AI)*: the free, open-source Kokoro voice running on the phone (no account or key;
+    ~90 MB one-time download, then offline).
+  - *Phone*: the built-in fallback. "Prepare coach calls" makes every live call ahead of time.
 - **Tips**: setup, accuracy and technique tips.
 - **Lessons**: stance, footwork and all six punches. Each has an animated 3D boxer you can
   watch from the front, ¾ or side, slowed down, mirrored for southpaws. It also lists key
@@ -77,6 +93,9 @@ Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips 
 | `index.html`, `styles.css`, `app.js` | Pages, sessions and Teach mode |
 | `engine.js` | Pose → 30 fps stream → punch detection |
 | `personal.js` | Your model: stance, taught punches and combos, k-nearest-neighbour classifier, self-test |
+| `filmstudy.js` | AI film study: commentary script, paused highlights, voice-over, video export |
+| `voice.js`, `voice-worker.js` | Voice: Kokoro neural TTS in a worker (cached) + phone-voice fallback, settings panel |
+| `breakdown.js` | Fight breakdown: two-fighter tracking, punch calls, exchanges and the write-up |
 | `lessons.js` | Lessons pages and the animated boxer (keyframed rig drawn on a canvas) |
 | `plexus.js` | Animated background |
 | `lstm.js` | Starter punch classifier (original project's network) |
