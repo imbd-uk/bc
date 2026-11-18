@@ -28,11 +28,25 @@ video never goes there.
 
 If the camera is blocked: **Settings › Safari › Camera › Allow**, then reload.
 
+## Updating the app on GitHub
+
+Open your repository, go into the `boxing-coach` folder, click **Add file › Upload files**,
+drag in everything from this folder, and click **Commit changes**. Files with the same
+name are replaced. Reopen the app on your phone (twice if it still shows the old version).
+
 ## Using it
 
-- Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips are in shot.
-- **Front camera** lets you watch yourself. The **back camera** gives better quality.
-- **Analyse a recorded video** lets you film a clip (or pick one) and have it scored.
+The app has four pages, switched with the tab bar at the bottom:
+
+- **Analyse**: start a shadow-boxing session (front/back camera, round timer, voice calls),
+  or score a recorded video.
+- **Teach**: train the AI on your own punches. It asks for 10 jabs, crosses, hooks and
+  uppercuts, learns them on the phone, and shows a self-test score. Redo any punch it
+  gets wrong. Once each punch has 5+ examples, Analyse uses **your model**.
+- **Tips**: setup, accuracy and technique tips.
+- **Lessons**: placeholder for future guided drills.
+
+Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips are in shot.
 
 ## How it works
 
@@ -52,8 +66,11 @@ If the camera is blocked: **Settings › Safari › Camera › Allow**, then rel
 
 | Path | What it is |
 |---|---|
-| `index.html`, `styles.css`, `app.js` | The app |
-| `lstm.js` | Punch classifier network |
+| `index.html`, `styles.css`, `app.js` | Pages, sessions and Teach mode |
+| `engine.js` | Pose → 30 fps stream → punch detection |
+| `personal.js` | Your model: taught examples, k-nearest-neighbour classifier, self-test |
+| `plexus.js` | Animated background |
+| `lstm.js` | Starter punch classifier (original project's network) |
 | `models/` | Pose model and converted classifier weights |
 | `vendor/` | MediaPipe runtime (bundled so nothing loads from other sites) |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Home-screen install and offline support |
