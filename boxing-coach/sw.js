@@ -1,8 +1,8 @@
 // Offline support. App code is fetched fresh when online (so updates show up),
 // large model/runtime files are served from cache. Never touches camera data.
-const CACHE = 'boxing-coach-v5';
+const CACHE = 'boxing-coach-v6';
 const FILES = [
-  './', './index.html', './styles.css', './app.js', './engine.js', './personal.js', './plexus.js', './lstm.js',
+  './', './index.html', './styles.css', './app.js', './engine.js', './personal.js', './plexus.js', './lstm.js', './lessons.js',
   './manifest.webmanifest', './icons/boxer-180.png', './icons/boxer-192.png', './icons/boxer-512.png',
   './models/punch_lstm.bin', './models/pose_landmarker_full.task',
   './vendor/vision_bundle.mjs',

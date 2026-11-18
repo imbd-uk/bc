@@ -9,6 +9,7 @@ import {
   KNN, evaluate, speedThreshold, stanceName, roleOf, comboGap, comboPrior, matchCombo,
 } from './personal.js';
 import { startPlexus } from './plexus.js';
+import { initLessons } from './lessons.js';
 
 const CFG = {
   COMBO_GAP: 1.2, ENCOURAGE_EVERY: 5, VOICE_COOLDOWN: 1.6, REST_S: 60,
@@ -72,16 +73,18 @@ document.querySelectorAll('.seg[data-setting]').forEach((seg) => {
 
 // ---------------------------------------------------------------- pages
 const PAGES = ['analyse', 'teach', 'tips', 'lessons'];
+let lessons = null;
 function route() {
-  const page = PAGES.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'analyse';
+  const [first, sub] = location.hash.slice(1).split('/');
+  const page = PAGES.includes(first) ? first : 'analyse';
   document.querySelectorAll('.page').forEach((p) => { p.hidden = p.dataset.page !== page; });
   document.querySelectorAll('.tabbar a').forEach((a) => {
     if (a.dataset.tab === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
+  if (lessons) { if (page === 'lessons') lessons.show(sub); else lessons.hide(); }
   window.scrollTo(0, 0);
 }
 addEventListener('hashchange', route);
-route();
 
 // ---------------------------------------------------------------- models
 let engine = null;
@@ -92,6 +95,13 @@ function rebuildPersonal() {
   evalResult = personal.examples.length >= 8 ? evaluate(personal) : null;
 }
 rebuildPersonal();
+
+lessons = initLessons({
+  root: $('page-lessons'),
+  getLead: () => personal.stance?.lead || null,
+  onPractise: (label, reps) => startTrain({ label, target: reps }),
+});
+route();
 
 const ready = (async () => {
   const [vision, starter] = await Promise.all([
@@ -302,12 +312,24 @@ function onPunch(type, confidence, t) {
   S.bestCombo = Math.max(S.bestCombo, S.combo);
   S.lastPunchT = t;
   S.byType[type]++;
+  let targetHit = false;
+  if (S.drill && type === S.drill.label) {
+    S.drill.n++;
+    el.modelPill.textContent = drillText();
+    targetHit = S.drill.n === S.drill.target;
+  }
   S.history.push(type); if (S.history.length > 5) S.history.shift();
   highlightUntil = t + 0.4;
   const quality = confidence > 0.9 ? 'Excellent' : confidence > 0.75 ? 'Good' : 'Nice';
-  showCallout(quality, lower(type));
   renderCounts();
-  if (S.combo >= 2) { /* the whole combo is named when it ends */ }
+  if (targetHit) {
+    showCallout('Target hit', `${S.drill.target} ${PLURAL[type]}`);
+    speakNow(`That's ${S.drill.target} ${PLURAL[type]}. Great work.`); S.lastVoiceT = t; bell(2);
+    return;
+  }
+  showCallout(quality, lower(type));
+  if (S.drill && type !== S.drill.label) speak(`That was a ${lower(type)}`, t);
+  else if (S.combo >= 2) { /* the whole combo is named when it ends */ }
   else if (S.punches % CFG.ENCOURAGE_EVERY === 0) speak(pick(ENCOURAGE), t);
   else speak(pick(CALLS[type]), t);
 }
@@ -349,14 +371,17 @@ function showCallout(quality, type) {
   el.callout.classList.add('show');
 }
 
-async function startTrain() {
+// drill: { label, target } from a lesson: the coach counts only that punch.
+async function startTrain(drill = null) {
   unlockAudio(); setStatus('');
   el.btnStart.disabled = true; el.btnStart.textContent = 'Starting camera…';
   try { await ready; facing = settings.camera; await openCamera(); }
-  catch (e) { console.error(e); setStatus(cameraError(e), true); refreshModelUI(); return; }
+  catch (e) { console.error(e); if (drill) location.hash = '#analyse'; setStatus(cameraError(e), true); refreshModelUI(); return; }
   refreshModelUI();
-  beginTrain('live');
+  beginTrain('live', drill);
 }
+
+function drillText() { return `${NAMES[S.drill.label]} ${S.drill.n}/${S.drill.target}`; }
 
 async function startFile(file) {
   unlockAudio(); setStatus('');
@@ -370,14 +395,16 @@ async function startFile(file) {
   beginTrain('file');
 }
 
-function beginTrain(src) {
+function beginTrain(src, drill = null) {
   mode = src === 'live' ? 'train' : 'file';
   S = newTrainSession(src);
+  S.drill = drill ? { ...drill, n: 0 } : null;
+  if (S.drill) S.roundLen = 0;  // drills run until you hit the target, no rounds
   voiceOn = settings.voice === 'on';
   engine.reset();
   engine.useStarter = S.model === 'starter';
   engine.motionSpeed = speedThreshold(personal, 0.1);
-  el.modelPill.textContent = S.model === 'personal' ? 'Your model' : 'Starter model';
+  el.modelPill.textContent = S.drill ? drillText() : S.model === 'personal' ? 'Your model' : 'Starter model';
   el.btnFlip.hidden = src !== 'live';
   renderCounts();
   el.callout.classList.remove('show');
@@ -395,15 +422,26 @@ function endTrain() {
   const summary = {
     when: Date.now(), secs, punches: S.punches, best: S.bestCombo,
     ppm: secs >= 10 ? Math.round(S.punches / (secs / 60)) : null, byType: S.byType, model: S.model,
-    combos: S.comboHits,
+    combos: S.comboHits, drill: S.drill,
   };
   if (S.src === 'live' && secs >= 10) writeJSON('bc.last', summary);
+  if (S.drill) {
+    const d = S.drill;
+    openSheet(d.n >= d.target ? 'Drill complete' : 'Drill ended', sessionBody(summary), () => { location.hash = `#lessons/${d.label}`; });
+    return;
+  }
   renderLast();
   openSheet('Session done', sessionBody(summary));
 }
 
 function sessionBody(s) {
   const frag = document.createDocumentFragment();
+  if (s.drill) {
+    const p = document.createElement('p'); p.className = 'sheet-note';
+    p.textContent = `${NAMES[s.drill.label]}: ${s.drill.n} of ${s.drill.target} called`
+      + (s.punches > s.drill.n ? ` · ${s.punches - s.drill.n} other punches` : '');
+    frag.append(p);
+  }
   frag.append(stats([[s.punches, 'Punches'], [fmt(s.secs), 'Time'], [s.best, 'Best combo'], [s.ppm ?? '–', 'Per minute']]));
   const max = Math.max(1, ...Object.values(s.byType));
   const bars = document.createElement('div'); bars.className = 'bars';
@@ -854,7 +892,7 @@ function readJSON(k) { try { const v = localStorage.getItem(k); return v ? JSON.
 function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ } }
 
 // ---------------------------------------------------------------- events
-el.btnStart.addEventListener('click', startTrain);
+el.btnStart.addEventListener('click', () => startTrain());
 el.file.addEventListener('change', () => { const f = el.file.files[0]; el.file.value = ''; if (f) startFile(f); });
 el.btnEnd.addEventListener('click', endTrain);
 el.btnVoice.addEventListener('click', () => {

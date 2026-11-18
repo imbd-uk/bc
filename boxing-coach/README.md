@@ -49,7 +49,10 @@ The app has four pages, switched with the tab bar at the bottom:
   Once each punch has 5+ examples, Analyse uses **your model**, which also uses which hand
   moved (lead or rear) and your taught combos to call fast punches, and says the combo name.
 - **Tips**: setup, accuracy and technique tips.
-- **Lessons**: placeholder for future guided drills.
+- **Lessons**: stance, footwork and all six punches. Each has an animated 3D boxer you can
+  watch from the front, ¾ or side, slowed down, mirrored for southpaws. It also lists key
+  points and common mistakes, and has a **Practise** button that starts the camera and counts
+  only that punch up to a target.
 
 Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips are in shot.
 
@@ -74,6 +77,7 @@ Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips 
 | `index.html`, `styles.css`, `app.js` | Pages, sessions and Teach mode |
 | `engine.js` | Pose → 30 fps stream → punch detection |
 | `personal.js` | Your model: stance, taught punches and combos, k-nearest-neighbour classifier, self-test |
+| `lessons.js` | Lessons pages and the animated boxer (keyframed rig drawn on a canvas) |
 | `plexus.js` | Animated background |
 | `lstm.js` | Starter punch classifier (original project's network) |
 | `models/` | Pose model and converted classifier weights |
