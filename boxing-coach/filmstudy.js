@@ -154,6 +154,9 @@ export function buildScript(res, frames, names, readLines = []) {
       } else {
         text = `A single ${lowerName(p.label)}${p.target === 'body' ? ' to the body' : ''} from ${me}. ${p.label === 'jab' ? 'Probing, gathering information.' : 'No set-up behind it.'}`;
       }
+      if (p.outcome === 'landed') text += pick([' And it lands clean.', ' It lands.', ' That one gets through.'], n);
+      else if (p.outcome === 'blocked') text += pick([` ${opp} blocks it.`, ' It hits the gloves.'], n);
+      else if (p.outcome === 'missed') text += pick([' It misses.', ` ${opp} makes it miss.`], n);
       beats.push({
         t: p.tEnd, kind: s.kind, label, text,
         marks: [{ type: 'ring', f: p.f, j: glove }, { type: 'arrow', from: { f: p.f, j: glove }, to: { f: 1 - p.f, part: p.target === 'body' ? 'body' : 'head' }, text: NAMES[p.label] }],
@@ -182,6 +185,10 @@ export function buildScript(res, frames, names, readLines = []) {
       }
       if (oO < -MOVE) { xs.push(pick([`${N(other)} gives ground.`, `${N(other)} backs away to reset.`], n)); xm.push({ type: 'move', f: other, dir: -1, text: 'Gives ground' }); }
       if (countered) { xs.push(pick([`And ${N(last)} gets the last word in that exchange.`, `${N(last)} finishes it.`, `Last punch: ${N(last)}.`], n)); xm.push({ type: 'tag', f: last, text: 'Last word' }); }
+      if (ex.winner != null && !ex.knockdown) {
+        xs.push(`${N(ex.winner)} wins that exchange, landing ${ex.landed[ex.winner]} to ${ex.landed[1 - ex.winner]}.`);
+        xm.push({ type: 'tag', f: ex.winner, text: 'Won it' });
+      }
       if (xs.length) beats.push({ t: tx, kind: 'exit', label, text: xs.join(' '), marks: [{ type: 'range' }, ...xm] });
     }
   });

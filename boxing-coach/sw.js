@@ -1,11 +1,11 @@
-// Offline support. App code is fetched fresh when online (so updates show up),
+﻿// Offline support. App code is fetched fresh when online (so updates show up),
 // large model/runtime files are served from cache. Never touches camera data.
-const CACHE = 'boxing-coach-v10';
+const CACHE = 'boxing-coach-v12';
 const FILES = [
   './', './index.html', './styles.css', './app.js', './engine.js', './personal.js', './plexus.js', './lstm.js', './lessons.js', './breakdown.js',
   './filmstudy.js', './voice.js', './voice-worker.js', './people.js',
   './manifest.webmanifest', './icons/boxer-180.png', './icons/boxer-192.png', './icons/boxer-512.png',
-  './models/punch_lstm.bin', './models/pose_landmarker_full.task',
+  './models/punch_lstm.bin', './models/pose_landmarker_full.task', './models/fight_punch_mlp.json',
   './vendor/vision_bundle.mjs',
   './vendor/wasm/vision_wasm_internal.js', './vendor/wasm/vision_wasm_internal.wasm',
   './vendor/wasm/vision_wasm_nosimd_internal.js', './vendor/wasm/vision_wasm_nosimd_internal.wasm',

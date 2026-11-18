@@ -4,10 +4,11 @@
 // Everything runs on this device; the clip is never uploaded.
 
 import { FilesetResolver, PoseLandmarker } from './vendor/vision_bundle.mjs';
-import { NAMES, matchCombo } from './personal.js';
+import { NAMES, ROLE, matchCombo } from './personal.js';
 import { voice } from './voice.js';
 import {
   BONES, COLORS, REF_COLOR, pt, mid, d2, center, torso, elbowAngle, packPose, box, Sampler, Tracker, isDown, refScore,
+  smoothIdentities, KEEP,
 } from './people.js';
 
 export { BONES, COLORS, pt, mid, center, torso, packPose, Tracker };
@@ -30,8 +31,9 @@ const A = {
 
 // ---------------------------------------------------------------- analysis
 // frames: [{ t, poses: [poseA|null, poseB|null], ref: pose|null, cut: bool }]  (pose = packPose output)
-export function analyse(frames) {
+export function analyse(frames, { model = null, overrides = null, net = punchNet } = {}) {
   const series = [0, 1].map((k) => frames.filter((f) => f.poses[k]).map((f) => ({ t: f.t, p: f.poses[k] })));
+  const headMotion = [null, null];
   const refSeries = frames.filter((f) => f.ref).map((f) => ({ t: f.t, p: f.ref }));
   const nearest = (k, t) => {
     const s = series[k];
@@ -68,6 +70,32 @@ export function analyse(frames) {
   const feintCands = [];
   for (const k of [0, 1]) punches.push(...detect(k));
   punches = punches.filter((p) => !inQuiet(p.t));
+  // the pre-trained BoxingVI network decides the punch type (and can veto things that weren't punches)
+  if (net) {
+    punches = punches.filter((p) => {
+      const probs = punchProbs(net, p.feat);
+      if (!probs) return true;
+      const [best, conf] = Object.entries(probs).sort((a, b) => b[1] - a[1])[0];
+      p.net = { label: best, conf };
+      if (best === 'none') return conf < 0.8;            // only drop it when the network is very sure
+      if (conf >= 0.45 && ROLE[best]) { p.label = best; p.role = ROLE[best]; }
+      return true;
+    });
+  }
+  // what you've taught it from corrections overrides the built-in rules
+  if (model) punches = punches.filter((p) => applyModel(model, p));
+  // corrections you made on this clip win over everything
+  if (overrides) {
+    punches = punches.filter((p) => {
+      const o = overrides[punchKey(p)];
+      if (!o) return true;
+      if (o.none) return false;
+      if (o.label) { p.label = o.label; p.role = ROLE[o.label]; }
+      if (o.outcome) p.outcome = o.outcome;
+      p.corrected = true;
+      return true;
+    });
+  }
   punches.sort((a, b) => a.t - b.t);
 
   // feints only count when they do something: the opponent reacts, or a real punch follows
@@ -104,6 +132,21 @@ export function analyse(frames) {
       ex.refNote = true;
       ex.notes.push({ k: 'ref', text: ex.knockdown ? 'The referee steps in and starts the count' : 'The referee steps in to separate them' });
     }
+  }
+  // who won each exchange: clean punches landed (power shots count a bit more), a knockdown wins it outright
+  for (const ex of exchanges) {
+    const wt = (p) => (p.label === 'jab' ? 1 : 1.5);
+    const score = [0, 1].map((k) => ex.punches.filter((p) => p.f === k && p.outcome === 'landed').reduce((s, p) => s + wt(p), 0));
+    ex.landed = [0, 1].map((k) => ex.punches.filter((p) => p.f === k && p.outcome === 'landed').length);
+    ex.winner = ex.knockdown ? 1 - ex.knockdown.f : Math.abs(score[0] - score[1]) < 0.5 ? null : score[0] > score[1] ? 0 : 1;
+    const w = ex.winner;
+    ex.notes.push({
+      k: 'result',
+      text: w == null
+        ? (ex.landed[0] + ex.landed[1] ? `Even exchange: ${ex.landed[0]} landed each way` : 'Nothing clean lands: an even exchange')
+        : ex.knockdown ? `{${w}} wins it with the knockdown`
+          : `{${w}} wins the exchange, landing ${ex.landed[w]} to ${ex.landed[1 - w]}`,
+    });
   }
 
   const duration = frames.length ? frames[frames.length - 1].t - frames[0].t : 0;
@@ -219,7 +262,9 @@ export function analyse(frames) {
         const approach = (d2(pt(start.p, wMi), aim(opp0)) - d2(pt(far.p, wMi), aim(opp1))) / torso(far.p);
         if (approach < A.MIN_APPROACH) continue;
         lastT = t;
-        out.push(classify(k, sd, t, start, far));
+        const p = classify(k, sd, t, start, far);
+        p.feat = punchFeature(at, t, dirAt(k, t), sd, far, p.role);
+        out.push(p);
       }
 
       // feints: a sharp, short move towards the opponent that comes straight back instead of landing
@@ -254,6 +299,58 @@ export function analyse(frames) {
       }
     }
     return out;
+  }
+
+  // A compact description of a punch's shape, for learning from corrections: both hands' paths
+  // (relative to the shoulders, facing the opponent) from just before to just after the punch.
+  function punchFeature(at, t, dir, hand, far, role) {
+    const other = hand === 'left' ? 'right' : 'left';
+    const f = [];
+    for (let i = 0; i < 10; i++) {
+      const r = at(t - 0.2 + i * 0.05);
+      for (const sd of [hand, other]) f.push(r.r[sd].rel[0] * dir, r.r[sd].rel[1], r.r[sd].reach);
+    }
+    f.push(elbowAngle(far.p, hand) / 180, role === 'lead' ? 1 : 0);
+    return f.map((v) => Math.max(-4, Math.min(4, v)));
+  }
+
+  // Did it land? Glove ends on the head or body, ideally with the head snapping back; or it ends on
+  // the opponent's gloves/forearms (blocked); otherwise it missed.
+  function outcomeOf(p, far, k) {
+    const op = nearest(1 - k, far.t);
+    if (!op) return null;
+    const L = torso(op.p), glove = pt(far.p, p.hand === 'left' ? 15 : 16);
+    const nose = pt(op.p, 0);
+    const sh = mid(pt(op.p, 11), pt(op.p, 12)), hp = mid(pt(op.p, 23), pt(op.p, 24));
+    const onHead = nose[2] > 0.3 && d2(glove, nose) < 0.5 * L;
+    const onBody = Math.abs(glove[0] - (sh[0] + hp[0]) / 2) < 0.45 * L && glove[1] > sh[1] && glove[1] < hp[1] + 0.1 * L;
+    const guard = [13, 14, 15, 16].map((mi) => pt(op.p, mi)).filter((q) => q[2] > 0.3);
+    const dGuard = guard.length ? Math.min(...guard.map((q) => d2(glove, q))) / L : 9;
+    const snap = headSnap(1 - k, far.t - 0.05, far.t + 0.25);
+    const hit = (p.target === 'body' ? onBody : onHead) || (snap && (onHead || onBody));
+    if (hit && (dGuard > 0.25 || snap)) return 'landed';
+    if (dGuard < 0.3) return 'blocked';
+    return 'missed';
+  }
+
+  // The opponent's head jerking (relative to their hips) right after a punch arrives.
+  function headSnap(k, t0, t1) {
+    if (!headMotion[k]) {
+      const s = series[k], m = [];
+      for (let i = 1; i < s.length; i++) {
+        const a = s[i - 1], b = s[i], dt = b.t - a.t;
+        if (dt <= 0 || dt > 0.12) continue;
+        const na = pt(a.p, 0), nb = pt(b.p, 0);
+        if (na[2] < 0.4 || nb[2] < 0.4) continue;
+        const ha = mid(pt(a.p, 23), pt(a.p, 24)), hb = mid(pt(b.p, 23), pt(b.p, 24));
+        m.push({ t: b.t, v: Math.hypot((nb[0] - hb[0]) - (na[0] - ha[0]), (nb[1] - hb[1]) - (na[1] - ha[1])) / torso(b.p) / dt });
+      }
+      const v = m.map((x) => x.v).sort((a, b) => a - b);
+      headMotion[k] = { m, noise: v.length ? v[v.length >> 1] : 0.5 };
+    }
+    const { m, noise } = headMotion[k];
+    const peak = Math.max(0, ...m.filter((x) => x.t >= t0 && x.t <= t1).map((x) => x.v));
+    return peak > Math.max(1.8, 3 * noise);
   }
 
   // lead or rear hand: the lead shoulder is the one nearer the opponent just before t
@@ -366,7 +463,9 @@ export function analyse(frames) {
       const wy = pt(far.p, hand === 'left' ? 15 : 16)[1];
       target = wy > sy + 0.4 * (hy - sy) ? 'body' : 'head';
     }
-    return { f: k, t, hand, role, label, target, tEnd: far.t };
+    const res = { f: k, t, hand, role, label, target, tEnd: far.t };
+    res.outcome = outcomeOf(res, far, k);
+    return res;
   }
 
   function group(ps) {
@@ -474,6 +573,79 @@ export function analyse(frames) {
   }
 }
 
+// ---------------------------------------------------------------- pre-trained punch model
+// A small neural network trained on the BoxingVI benchmark (Kumar et al., arXiv:2511.16524):
+// thousands of labelled punches from 18 boxers. It reads the same punch shape the app computes
+// (punchFeature) and says which of the six punches it was, or that it wasn't a punch at all.
+// models/fight_punch_mlp.json holds weights only, no BoxingVI data.
+let punchNet = null, punchNetLoading = null;
+export function loadPunchModel() {
+  if (!punchNetLoading) {
+    punchNetLoading = fetch('./models/fight_punch_mlp.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => { punchNet = m && Array.isArray(m.layers) ? m : null; return punchNet; })
+      .catch(() => null);
+  }
+  return punchNetLoading;
+}
+export function punchProbs(net, feat) {
+  if (!net || !feat || feat.length !== net.inputs) return null;
+  let h = feat.map((v, i) => (v - net.mean[i]) / net.std[i]);
+  net.layers.forEach((L, li) => {
+    const out = new Array(L.b.length);
+    for (let o = 0; o < L.b.length; o++) {
+      let s = L.b[o]; const row = L.w[o];
+      for (let i = 0; i < row.length; i++) s += row[i] * h[i];
+      out[o] = s;
+    }
+    h = li < net.layers.length - 1 ? out.map((v) => Math.max(0, v)) : out;
+  });
+  const mx = Math.max(...h), ex = h.map((v) => Math.exp(v - mx)), sum = ex.reduce((a, b) => a + b, 0);
+  return Object.fromEntries(net.labels.map((l, i) => [l, ex[i] / sum]));
+}
+
+// ---------------------------------------------------------------- fight model (learned from corrections)
+// Every time you correct (or confirm) a punch in the results, its shape is saved with the right
+// answer. Once there are enough, new clips are checked against them: k-nearest-neighbours, the same
+// idea as the Teach page, but for punches seen in fight footage. Stored in this browser only.
+const FM_KEY = 'bc.fightModel.v1';
+export function loadFightModel() {
+  try { const m = JSON.parse(localStorage.getItem(FM_KEY) || 'null'); if (m && Array.isArray(m.ex)) return m; } catch { /* */ }
+  return { ex: [] };
+}
+export function saveFightModel(m) {
+  try { localStorage.setItem(FM_KEY, JSON.stringify(m)); return true; } catch { return false; }
+}
+export const punchKey = (p) => `${p.f}@${p.t.toFixed(2)}`;
+function fdist(a, b) { let s = 0; for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; s += d * d; } return Math.sqrt(s); }
+// How far apart taught examples typically are (sets what "similar" means for this model).
+function modelScale(m) {
+  if (m._scale && m._n === m.ex.length) return m._scale;
+  const ds = [];
+  for (let i = 0; i < m.ex.length; i++) for (let j = i + 1; j < m.ex.length && ds.length < 4000; j++) {
+    if (m.ex[i].f.length === m.ex[j].f.length) ds.push(fdist(m.ex[i].f, m.ex[j].f));
+  }
+  ds.sort((a, b) => a - b);
+  m._scale = Math.max(0.05, ds.length ? ds[ds.length >> 1] : 2); m._n = m.ex.length;
+  return m._scale;
+}
+// Returns false if the model says it wasn't a punch; may relabel it. Only punches that really look
+// like something you taught it are changed, and the built-in call keeps a vote of its own.
+function applyModel(m, p) {
+  if (!p.feat || m.ex.length < 8) return true;
+  const scale = modelScale(m);
+  const near = m.ex.filter((e) => e.f.length === p.feat.length).map((e) => [fdist(e.f, p.feat), e.l])
+    .filter(([d]) => d <= 1.5 * scale).sort((a, b) => a[0] - b[0]).slice(0, 5);
+  if (!near.length) return true;
+  const votes = { [p.label]: 1 / (0.7 * scale + 0.05) }; let total = votes[p.label];
+  for (const [d, l] of near) { const w = 1 / (d + 0.05); votes[l] = (votes[l] || 0) + w; total += w; }
+  const [best, v] = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  if (v / total < 0.6) return true;
+  if (best === 'none') return false;
+  if (best !== p.label && ROLE[best]) { p.label = best; p.role = ROLE[best]; p.learned = true; }
+  return true;
+}
+
 function pName(p, bare = false) {
   const n = NAMES[p.label].toLowerCase();
   const tgt = p.target === 'body' ? ' to the body' : '';
@@ -483,6 +655,8 @@ function pName(p, bare = false) {
 function fighterStats(k, punches, exchanges, duration, knockdowns = []) {
   const mine = punches.filter((p) => p.f === k);
   const scored = knockdowns.filter((kd) => kd.f !== k).length, suffered = knockdowns.filter((kd) => kd.f === k).length;
+  const landed = mine.filter((p) => p.outcome === 'landed').length;
+  const won = exchanges.filter((e) => e.winner === k).length;
   const by = {};
   for (const p of mine) by[p.label] = (by[p.label] || 0) + 1;
   const body = mine.filter((p) => p.target === 'body').length;
@@ -503,7 +677,8 @@ function fighterStats(k, punches, exchanges, duration, knockdowns = []) {
   }
   const topPair = Object.entries(pairs).sort((a, b) => b[1] - a[1])[0] || null;
   return {
-    total: mine.length, by, led, counters, scored, suffered,
+    total: mine.length, by, led, counters, scored, suffered, landed, won,
+    accuracy: mine.length ? landed / mine.length : null,
     bodyPct: tgt ? body / tgt : null,
     perMin: duration >= 10 ? mine.length / (duration / 60) : null,
     topPair: topPair && topPair[1] >= 2 ? { seq: topPair[0].split('>'), n: topPair[1] } : null,
@@ -528,6 +703,14 @@ export function insights(res, names) {
     if (s.bodyPct != null && s.total >= 6 && s.bodyPct >= 0.3) out.push(`${nm} invests in the body (${Math.round(s.bodyPct * 100)}% of shots).`);
     if (s.feints >= 3) out.push(`${nm} feinted ${s.feints} times${s.feintReactions ? ` and drew ${s.feintReactions} reaction${s.feintReactions > 1 ? 's' : ''}` : ''}: setting traps rather than just throwing.`);
     if (s.levels >= 3) out.push(`${nm} changed levels ${s.levels} times, mixing up where the punches come from.`);
+  }
+  if (a.won + b.won >= 2 && a.won !== b.won) {
+    const w = a.won > b.won ? 0 : 1;
+    out.unshift(`${names[w]} won more of the exchanges (${res.stats[w].won} to ${res.stats[1 - w].won}).`);
+  }
+  if (a.total >= 5 && b.total >= 5 && a.accuracy != null && b.accuracy != null && Math.abs(a.accuracy - b.accuracy) >= 0.15) {
+    const w = a.accuracy > b.accuracy ? 0 : 1;
+    out.push(`${names[w]} was the more accurate (${Math.round(res.stats[w].accuracy * 100)}% landed vs ${Math.round(res.stats[1 - w].accuracy * 100)}%).`);
   }
   if (a.total && b.total) {
     const more = a.total > b.total ? 0 : 1, r = res.stats[more].total / Math.max(1, res.stats[1 - more].total);
@@ -563,13 +746,14 @@ export function initBreakdown({ root }) {
       <div class="row"><span class="row-label"><i class="dot f1"></i>Fighter B</span><input class="name-in" data-k="n1" value="Fighter B" maxlength="24" aria-label="Fighter B name"></div>
       <div class="row"><span class="row-label" id="lbl-quality">Detail</span>
         <div class="seg" role="radiogroup" aria-labelledby="lbl-quality" data-k="quality">
-          <button type="button" role="radio" data-value="0.5" aria-checked="true">High (½ speed)</button>
+          <button type="button" role="radio" data-value="0.25" aria-checked="true">Thorough</button>
+          <button type="button" role="radio" data-value="0.5" aria-checked="false">Standard</button>
           <button type="button" role="radio" data-value="1" aria-checked="false">Quick</button>
         </div>
       </div>
     </div>
     <label class="btn primary" data-k="pick">Choose a fight clip<input type="file" accept="video/*" hidden data-k="file"></label>
-    <p class="hint-text" data-k="hint">Works best side-on, both fighters fully in frame, few camera cuts. Clips up to ~3 minutes.</p>
+    <p class="hint-text" data-k="hint">Thorough reads the clip at ¼ speed and double-checks who's who across the whole clip (a 1-minute clip takes about 4–5 minutes). The breakdown then plays back at normal speed. Works best side-on, both fighters in frame.</p>
     <p class="status" data-k="status" role="status"></p>
     <div class="card bd-player" data-k="player" hidden>
       <div class="bd-stage"><video data-k="video" playsinline muted></video><canvas data-k="overlay"></canvas><canvas data-k="film" class="film-canvas" hidden></canvas></div>
@@ -594,7 +778,11 @@ export function initBreakdown({ root }) {
     <p class="foot-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>The clip is processed on this phone and never uploaded. Calls are estimates from body pose: it sees punches thrown, not whether they landed.</p>`;
   const $ = (k) => root.querySelector(`[data-k="${k}"]`);
   const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
-  let rate = 0.5, frames = [], result = null, processing = false, url = null, watchEnd = null, raf = 0;
+  loadPunchModel();   // the pre-trained punch network (small; fetched once, then cached offline)
+  let rate = 0.25, frames = [], result = null, processing = false, url = null, watchEnd = null, raf = 0;
+  let rawFrames = [], liveTracker = null;   // everything seen, for the second pass
+  let fightModel = loadFightModel(), overrides = {};   // learned corrections; this clip's corrections
+  const OUTCOME_ICON = { landed: '✓', blocked: '⊘', missed: '✗' };
   const names = () => [$('n0').value.trim() || 'Fighter A', $('n1').value.trim() || 'Fighter B'];
   let setup = null;   // { dets, roles, boxes } while choosing who's who
 
@@ -629,8 +817,9 @@ export function initBreakdown({ root }) {
     video.src = url; video.controls = false; video.muted = true;
     try { await new Promise((ok, bad) => { video.onloadeddata = ok; video.onerror = bad; }); }
     catch { fail('That video could not be opened on this device.'); return; }
-    frames = []; result = null;
+    frames = []; result = null; rawFrames = []; overrides = {};
     const tracker = new Tracker(video.videoWidth);
+    liveTracker = tracker;
     const sampler = new Sampler();
     const w = video.videoWidth, h = video.videoHeight;
 
@@ -657,6 +846,7 @@ export function initBreakdown({ root }) {
           const apps = dets.map((p) => sampler.appearance(p));
           const [a, b, ref] = tracker.update(dets, apps, cut, t);
           frames.push({ t, poses: [a, b], ref, cut });
+          rawFrames.push({ t, dets, apps, cut });
         } catch (e) { console.error(e); }
         $('pbar').style.width = `${Math.min(100, (t / (video.duration || 1)) * 100)}%`;
         $('ptext').textContent = `Tracking the fighters and referee… ${fmt(t)} / ${fmt(video.duration)}`;
@@ -813,12 +1003,18 @@ export function initBreakdown({ root }) {
     octx.restore();
   }
 
-  function finish() {
+  async function finish() {
     if (!processing) return;
     processing = false;
     video.pause();
+    await loadPunchModel();
+    // second pass: re-decide who's who for every frame using the whole clip
+    if (rawFrames.length && liveTracker) {
+      $('ptext').textContent = 'Double-checking who\'s who across the whole clip…';
+      try { frames = smoothIdentities(rawFrames, liveTracker.tracks.map((tr) => tr.bank)); } catch (e) { console.error(e); }
+    }
     $('progress').hidden = true;
-    result = analyse(frames);
+    result = analyse(frames, { model: fightModel });
     const secs = Math.max(1, (frames.length ? frames[frames.length - 1].t : video.currentTime) || video.duration || 1);
     if (frames.length < secs * 3) {
       $('status').textContent = 'Only part of the clip could be read (the app was probably in the background). Keep it open on screen and try again.';
@@ -862,14 +1058,25 @@ export function initBreakdown({ root }) {
       for (let j = lo; j >= 0 && fr.t - frames[j].t <= 0.3; j--) { if (frames[j].cut && j !== lo) break; const p = get(frames[j]); if (p) return p; }
       return null;
     };
+    // glide between the two analysed frames either side of the playback time
+    const smooth = (get) => {
+      const cur = held(get);
+      const a = frames[lo - 1], b = frames[lo];
+      if (!cur || !a || !b || b.cut || b.t <= a.t || t < a.t || t > b.t) return cur;
+      const pa = get(a), pb = get(b);
+      if (!pa || !pb) return cur;
+      const u = (t - a.t) / (b.t - a.t), out = new Float32Array(pa.length);
+      for (let i = 0; i < pa.length; i++) out[i] = pa[i] + (pb[i] - pa[i]) * u;
+      return out;
+    };
     const head = (p) => { const q = pt(p, 0); return [ox + q[0] * sc, oy + q[1] * sc]; };
-    const refP = held((f) => f.ref);
+    const refP = smooth((f) => f.ref);
     if (refP) {
       drawSkeleton(refP, REF_COLOR, sc, ox, oy, 0.6);
       const h = head(refP); tag('REF', h[0], h[1] - 26, REF_COLOR);
     }
     const nm = names();
-    [0, 1].map((k) => held((f) => f.poses[k])).forEach((p, k) => {
+    [0, 1].map((k) => smooth((f) => f.poses[k])).forEach((p, k) => {
       if (!p) return;
       drawSkeleton(p, COLORS[k], sc, ox, oy);
       const h = head(p);
@@ -1018,7 +1225,7 @@ export function initBreakdown({ root }) {
       const h = document.createElement('p'); h.className = `card-title f${k}`;
       h.textContent = nm[k] + (s.scored ? ` · ${s.scored} knockdown${s.scored > 1 ? 's' : ''}` : '') + (s.suffered ? ` · down ${s.suffered}×` : '');
       const st = document.createElement('div'); st.className = 'bd-stats';
-      for (const [v, l] of [[s.total, 'Punches'], [s.led, 'Led'], [s.counters, 'Counters'], [s.bodyPct == null ? '–' : `${Math.round(s.bodyPct * 100)}%`, 'Body'], [s.feints, 'Feints'], [s.levels, 'Level chg']]) {
+      for (const [v, l] of [[s.total, 'Punches'], [s.accuracy == null ? '–' : `${s.landed} (${Math.round(s.accuracy * 100)}%)`, 'Landed'], [s.won, 'Won'], [s.counters, 'Counters'], [s.feints, 'Feints'], [s.levels, 'Level chg']]) {
         const d = document.createElement('div'); d.className = 'stat';
         d.innerHTML = `<span class="v"></span><span class="k"></span>`;
         d.firstChild.textContent = v; d.lastChild.textContent = l; st.append(d);
@@ -1054,23 +1261,103 @@ export function initBreakdown({ root }) {
       btn.addEventListener('click', () => watch(ex));
       top.append(h, btn);
       const seq = document.createElement('ol'); seq.className = 'bd-seq';
+      const fixBox = document.createElement('div'); fixBox.className = 'bd-fix'; fixBox.hidden = true;
       for (const p of ex.punches) {
-        const li = document.createElement('li'); li.className = `f${p.f}`;
-        li.textContent = NAMES[p.label] + (p.target === 'body' ? ' ↓' : '');
-        li.title = `${nm[p.f]} · ${fmt(p.t)}`;
-        seq.append(li);
+        const li = document.createElement('li');
+        const b = document.createElement('button'); b.type = 'button';
+        b.className = `f${p.f} o-${p.outcome || 'unknown'}${p.corrected ? ' fixed' : ''}`;
+        b.textContent = `${OUTCOME_ICON[p.outcome] || ''} ${NAMES[p.label]}${p.target === 'body' ? ' ↓' : ''}`.trim();
+        b.title = `${nm[p.f]} · ${fmt(p.t)} · ${p.outcome || 'outcome unknown'} · tap to correct`;
+        b.addEventListener('click', () => openFix(p, fixBox));
+        li.append(b); seq.append(li);
       }
       const notes = document.createElement('ul'); notes.className = 'bd-notes';
       for (const n of ex.notes) {
         const li = document.createElement('li'); li.className = `n-${n.k}`;
         li.append(fill(n.text, nm)); notes.append(li);
       }
-      c.append(top, seq, notes);
+      c.append(top, seq, fixBox, notes);
       R.append(c);
     }
     const legend = document.createElement('p'); legend.className = 'hint-text';
-    legend.textContent = '↓ = to the body. Lead/rear is read from which shoulder is nearer the opponent.';
+    legend.textContent = '✓ landed · ⊘ blocked · ✗ missed · ↓ to the body. Tap any punch to correct it: every correction teaches the fight model.';
     R.append(legend);
+
+    // the fight model trained from your corrections
+    const fm = document.createElement('div'); fm.className = 'card bd-model';
+    const counts = {};
+    for (const e of fightModel.ex) counts[e.l] = (counts[e.l] || 0) + 1;
+    fm.innerHTML = `<p class="card-title">Fight model</p>
+      <p class="sheet-note" data-m="sum"></p>
+      <div class="row-btns"><button type="button" class="mini" data-m="export">Export</button>
+        <label class="mini">Import<input type="file" accept="application/json" hidden data-m="import"></label>
+        <button type="button" class="mini" data-m="reset">Reset</button></div>`;
+    fm.querySelector('[data-m="sum"]').textContent = fightModel.ex.length
+      ? `Learned from ${fightModel.ex.length} correction${fightModel.ex.length > 1 ? 's' : ''} (${Object.entries(counts).map(([l, n]) => `${l === 'none' ? 'not a punch' : NAMES[l].toLowerCase()} ${n}`).join(', ')}). ${fightModel.ex.length < 8 ? `It starts using them after 8.` : 'It now checks every new clip against them.'}`
+      : 'Not trained yet. Tap punches in the exchanges above to correct or confirm them; after 8 it starts using what you taught it on every clip.';
+    fm.querySelector('[data-m="export"]').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(fightModel)], { type: 'application/json' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'fight-model.json'; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    });
+    fm.querySelector('[data-m="import"]').addEventListener('change', async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        const m = JSON.parse(await f.text());
+        if (!Array.isArray(m.ex)) throw new Error('bad file');
+        fightModel.ex.push(...m.ex.filter((x) => x && Array.isArray(x.f) && typeof x.l === 'string'));
+        saveFightModel(fightModel); reanalyse();
+      } catch { $('status').textContent = 'That file isn\'t a fight model export.'; }
+    });
+    fm.querySelector('[data-m="reset"]').addEventListener('click', (e) => {
+      if (!e.target.dataset.sure) { e.target.dataset.sure = '1'; e.target.textContent = 'Tap again to reset'; return; }
+      fightModel = { ex: [] }; saveFightModel(fightModel); reanalyse();
+    });
+    R.append(fm);
+  }
+
+  // Correct (or confirm) one punch: type, outcome, or "not a punch". Saved as a training example.
+  function openFix(p, box) {
+    box.hidden = false;
+    box.innerHTML = `<p class="bd-fix-title"></p>
+      <div class="bd-fix-row" data-x="labels"></div>
+      <div class="seg" role="radiogroup" aria-label="Outcome" data-x="outcome">
+        <button type="button" role="radio" data-value="landed">✓ Landed</button>
+        <button type="button" role="radio" data-value="blocked">⊘ Blocked</button>
+        <button type="button" role="radio" data-value="missed">✗ Missed</button></div>
+      <div class="row-btns"><button type="button" class="mini primary-mini" data-x="save">Save</button>
+        <button type="button" class="mini" data-x="none">Not a punch</button>
+        <button type="button" class="mini" data-x="cancel">Cancel</button></div>`;
+    const X = (k) => box.querySelector(`[data-x="${k}"]`);
+    box.querySelector('.bd-fix-title').textContent = `${names()[p.f]} at ${fmt(p.t)}: what was it?`;
+    let label = p.label, outcome = p.outcome;
+    const sync = () => {
+      X('labels').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.value === label)));
+      X('outcome').querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.value === outcome)));
+    };
+    for (const l of Object.keys(NAMES)) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'mini'; b.dataset.value = l; b.textContent = NAMES[l];
+      b.addEventListener('click', () => { label = l; sync(); });
+      X('labels').append(b);
+    }
+    X('outcome').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { outcome = b.dataset.value; sync(); } });
+    const commit = (none) => {
+      if (p.feat) { fightModel.ex.push({ l: none ? 'none' : label, f: p.feat }); saveFightModel(fightModel); }
+      overrides[punchKey(p)] = none ? { none: true } : { label, outcome };
+      reanalyse();
+      $('status').textContent = none ? 'Removed, and the model will learn it wasn\'t a punch.' : 'Saved. The model learns from every correction.';
+      $('status').classList.remove('error');
+    };
+    X('save').addEventListener('click', () => commit(false));
+    X('none').addEventListener('click', () => commit(true));
+    X('cancel').addEventListener('click', () => { box.hidden = true; });
+    sync();
+  }
+
+  function reanalyse() {
+    if (!frames.length) return;
+    result = analyse(frames, { model: fightModel, overrides });
+    render();
   }
 
   return {
@@ -1085,12 +1372,12 @@ export function initBreakdown({ root }) {
     async _testVideo(src, fs) {
       video.src = src; video.controls = true; video.muted = true;
       await new Promise((ok) => { video.onloadeddata = ok; });
-      frames = fs; result = analyse(fs);
+      frames = fs; overrides = {}; result = analyse(fs, { model: fightModel });
       $('player').hidden = false; $('progress').hidden = true;
       startOverlay(); render(); return result;
     },
     // Developer test hook: show the breakdown for ready-made frames (no video).
-    _test(fs) { frames = fs; result = analyse(fs); $('player').hidden = false; $('progress').hidden = true; render(); return result; },
+    _test(fs) { frames = fs; overrides = {}; result = analyse(fs, { model: fightModel }); $('player').hidden = false; $('progress').hidden = true; render(); return result; },
   };
 }
 

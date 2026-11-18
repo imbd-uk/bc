@@ -58,7 +58,14 @@ The app has four pages, switched with the tab bar at the bottom:
   that comes straight back, counted when the opponent reacts or a punch follows) and **level changes**
   (a quick drop in height, measured so camera tilts and zooms don't fake it), and links them to the
   punch they set up ("feints the jab, then throws a cross", "changes levels and digs to the body").
-  Type each fighter's name in the who's-who step and it's used everywhere. It tracks both fighters,
+  Type each fighter's name in the who's-who step and it's used everywhere.
+  **Thorough** mode (default) reads the clip at ¼ speed, then a second pass re-decides who's who for
+  every frame using the whole clip, so one-frame swaps and flickers are removed. Review plays at normal
+  speed with skeletons gliding between analysed frames. Each punch is marked **landed / blocked /
+  missed** (glove on head/body, the head snapping back, or meeting the guard) and each exchange gets a
+  **winner**. **Tap any punch to correct it** (type, outcome, or not a punch): corrections are saved as
+  a **fight model** in the browser and, after 8, are applied to every new clip. The model can be
+  exported and imported as a JSON file. It tracks both fighters,
   calls each punch (type, lead/rear, head/body), splits the clip into exchanges and writes up
   who led, the setups (jab into the cross, double jab, body-to-head…), the counters and who had
   the last word, plus each fighter's output, punch mix and go-to combination. Tap an
@@ -95,6 +102,17 @@ Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips 
   the model sees the same timing it was trained on, whatever the phone's frame rate.
 - `models/block_lstm.bin` (the original block classifier) is included but not used yet,
   as in the original app.
+- **Fight punch model** (`models/fight_punch_mlp.json`, Fights tab): a small neural network
+  (62 → 96 → 64 → 6) that names each punch found in a fight clip. It was trained on the
+  **BoxingVI** skeleton benchmark (Kumar, Baghel, Singh, Badatya, Yadav, Srinivasan and Hegde,
+  *BoxingVI: A Multi-Modal Benchmark for Boxing Action Recognition and Localization*,
+  arXiv:2511.16524, 2025; github.com/Bikudebug/BoxingVI): about 4,750 labelled punches from nine
+  of its videos. The file holds network weights only; none of the BoxingVI videos, skeletons or
+  labels are included in this repository. The BoxingVI repository does not state a licence.
+  On boxers it hadn't seen it was right **68%** of the time across the six punch types
+  (cross ~97%, jab ~80%, lead hook ~60%, rear uppercut 60–89%, lead uppercut ~45%, rear hook poor),
+  against 32.5% for the hand-written rules it replaces. Corrections you make in the app are
+  layered on top of it.
 
 ## Files
 
@@ -110,6 +128,6 @@ Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips 
 | `lessons.js` | Lessons pages and the animated boxer (keyframed rig drawn on a canvas) |
 | `plexus.js` | Animated background |
 | `lstm.js` | Starter punch classifier (original project's network) |
-| `models/` | Pose model and converted classifier weights |
+| `models/` | Pose model, converted classifier weights, and the BoxingVI-trained fight punch model |
 | `vendor/` | MediaPipe runtime (bundled so nothing loads from other sites) |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Home-screen install and offline support |

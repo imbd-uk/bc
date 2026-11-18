@@ -158,17 +158,31 @@ export function dedupe(dets, apps) {
   return { dets: dets.filter((_, i) => keep[i]), apps: apps.filter((_, i) => keep[i]) };
 }
 
-// Higher = more like a referee (shirt with sleeves, often white, bare hands).
+// Is this colour skin? Skin of every tone sits in a warm hue band with some colour in it;
+// shirts (white, grey, black, light blue) are greyish or cool. Lab colour in, true/false out.
+export function isSkin(lab) {
+  if (!lab) return null;
+  const [L, a, b] = lab;
+  const chroma = Math.hypot(a, b), hue = Math.atan2(b, a) * 180 / Math.PI;
+  return L > 12 && L < 92 && chroma >= 7 && hue >= 12 && hue <= 88;
+}
+
+// Higher = more like a referee. A fighter's torso and arms are bare skin and his hands are gloves;
+// a referee's torso and arms are covered by a shirt (often white) and his hands are bare.
+// Deliberately doesn't lean on the face: a fighter with his back turned shows hair, not face.
 export function refScore(app) {
   if (!app) return 0;
-  const vals = [dE(app.torso, app.face), dE(app.arm, app.face)].filter((v) => v != null);
-  const clothed = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 15;
+  let s = 0;
+  const tS = isSkin(app.torso), aS = isSkin(app.arm), hS = isSkin(app.hand);
+  s += tS == null ? 0.4 : tS ? 0 : 1.2;          // shirt over the torso
+  s += aS == null ? 0.2 : aS ? 0 : 0.6;          // sleeves
   const t = app.torso;
-  const white = t && t[0] > 62 && Math.hypot(t[1], t[2]) < 22 ? 1 : 0;
-  const gloved = dE(app.hand, app.face) ?? 15;
-  return clothed / 25 + 0.7 * white - gloved / 40;
+  if (t && t[0] > 70 && Math.hypot(t[1], t[2]) < 10) s += 0.5;   // properly white shirt
+  if (hS === true) s += 0.3;                     // bare hands
+  else if (hS === false && tS) s -= 0.4;         // gloves on a bare-chested person
+  return s;
 }
-export const REF_THRESHOLD = 0.8;
+export const REF_THRESHOLD = 1.3;
 
 // A person's look: trunks histogram + trunks, glove, skin and face colours.
 function sigOf(app) {
@@ -185,7 +199,7 @@ function oneDist(app, sig) {
   return w ? s / w : 0.5;
 }
 // Distance to the closest of the person's remembered looks (the "look bank").
-function sigDist(app, bank) {
+export function sigDist(app, bank) {
   if (!app || !bank) return 0.5;
   const list = Array.isArray(bank) ? bank : [bank];
   if (!list.length) return 0.5;
@@ -264,7 +278,7 @@ export class Tracker {
       const stale = t - tr.seen > 1.0;
       const pos = cut || !tr.pos || stale ? 0.4 : Math.min(2, d2(cs[i], tr.pos) / this.gate);
       const app = sigDist(apps[i], tr.bank);
-      const role = k === 2 ? Math.max(0, REF_THRESHOLD + 0.2 - scores[i]) * 0.9 : Math.max(0, scores[i] - 0.2) * 1.4;
+      const role = k === 2 ? Math.max(0, REF_THRESHOLD + 0.2 - scores[i]) * 0.9 : Math.max(0, scores[i] - 0.6) * 1.4;
       // looking like one of the OTHER people we know is strong evidence it isn't this one
       let other = 0;
       for (const j of [0, 1, 2]) {
@@ -308,6 +322,74 @@ export class Tracker {
       return dets[i];
     });
   }
+}
+
+// ---------------------------------------------------------------- second pass
+// After the whole clip has been read, choose who's who for every frame at once (Viterbi): each
+// frame's choice must match each person's look AND join up smoothly with the frames before and
+// after it. This removes the one-frame swaps and flickers a frame-by-frame tracker can make.
+// raw: [{ t, dets, apps, cut }], banks: [bankA, bankB, bankRef] from the tracker.
+export function smoothIdentities(raw, banks) {
+  const MISS = [1.3, 1.3, 1.1];
+  const frames = raw.map((f) => {
+    const { dets, apps } = dedupe(f.dets, f.apps);
+    const sizes = dets.map(torso), big = Math.max(0, ...sizes);
+    const scores = apps.map(refScore);
+    const cs = dets.map(center);
+    // every way of giving (some of) the people in this frame the roles A, B, referee
+    const states = [];
+    const n = dets.length;
+    for (let a = -1; a < n; a++) for (let b = -1; b < n; b++) for (let r = -1; r < n; r++) {
+      const s = [a, b, r];
+      if ((a >= 0 && (a === b || a === r)) || (b >= 0 && b === r)) continue;
+      let c = 0;
+      for (let k = 0; k < 3; k++) {
+        const i = s[k];
+        if (i < 0) { c += MISS[k]; continue; }
+        if (sizes[i] < 0.45 * big) { c = Infinity; break; }
+        // a slot nobody was ever confirmed as stays empty (e.g. the second fighter never properly in shot)
+        if (!banks[k] || !banks[k].length) { c = Infinity; break; }
+        const role = k === 2 ? Math.max(0, REF_THRESHOLD + 0.2 - scores[i]) * 0.55 : Math.max(0, scores[i] - 0.6) * 1.4;
+        // the referee slot must also look like the referee seen so far (shirt, trousers), not just "not a fighter"
+        c += (k === 2 ? 1.7 : 1.2) * sigDist(apps[i], banks[k]) + role;
+      }
+      if (c < Infinity) states.push({ s, c });
+    }
+    return { t: f.t, cut: f.cut, dets, cs, sizes, states };
+  });
+  // dynamic programming over the clip
+  let prev = null;
+  for (const f of frames) {
+    for (const st of f.states) {
+      if (!prev) { st.total = st.c; st.from = -1; continue; }
+      let best = Infinity, from = -1;
+      prev.states.forEach((ps, j) => {
+        let tc = 0;
+        for (let k = 0; k < 3; k++) {
+          const i = st.s[k], pi = ps.s[k];
+          if (i >= 0 && pi >= 0) {
+            if (f.cut) continue;
+            const L = Math.max(f.sizes[i], prev.sizes[pi]);
+            const jump = d2(f.cs[i], prev.cs[pi]) / L;
+            tc += 0.9 * Math.min(2.5, Math.max(0, jump - 0.15) / 0.4);   // people don't teleport
+          } else if ((i >= 0) !== (pi >= 0)) tc += 0.15;
+        }
+        const v = ps.total + tc;
+        if (v < best) { best = v; from = j; }
+      });
+      st.total = best + st.c; st.from = from;
+    }
+    prev = f;
+  }
+  // walk back along the cheapest path
+  const out = new Array(frames.length);
+  let idx = frames.length ? frames[frames.length - 1].states.reduce((b, s, j, arr) => (s.total < arr[b].total ? j : b), 0) : -1;
+  for (let fi = frames.length - 1; fi >= 0; fi--) {
+    const f = frames[fi], st = f.states[idx];
+    out[fi] = { t: f.t, cut: f.cut, poses: [st.s[0] >= 0 ? f.dets[st.s[0]] : null, st.s[1] >= 0 ? f.dets[st.s[1]] : null], ref: st.s[2] >= 0 ? f.dets[st.s[2]] : null };
+    idx = st.from;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- knockdowns
