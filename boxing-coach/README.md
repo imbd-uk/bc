@@ -54,7 +54,11 @@ The app has four pages, switched with the tab bar at the bottom:
   fighters are tracked by appearance (trunks, gloves, skin), so swapping sides or camera cuts don't
   swap them. Small arm movements, guard adjustments and the referee's gestures don't count as
   punches: a punch has to travel towards an opponent who is in shot. It also detects **knockdowns**
-  (and what caused them) and when the **referee steps in**. It tracks both fighters,
+  (and what caused them), when the **referee steps in**, **feints** (a short, sharp move at the opponent
+  that comes straight back, counted when the opponent reacts or a punch follows) and **level changes**
+  (a quick drop in height, measured so camera tilts and zooms don't fake it), and links them to the
+  punch they set up ("feints the jab, then throws a cross", "changes levels and digs to the body").
+  Type each fighter's name in the who's-who step and it's used everywhere. It tracks both fighters,
   calls each punch (type, lead/rear, head/body), splits the clip into exchanges and writes up
   who led, the setups (jab into the cross, double jab, body-to-head…), the counters and who had
   the last word, plus each fighter's output, punch mix and go-to combination. Tap an

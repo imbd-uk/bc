@@ -60,7 +60,7 @@ export function buildScript(res, frames, names, readLines = []) {
 
   beats.push({
     t: tStart, kind: 'intro',
-    text: `Let's break this one down. ${N(0)} in blue on the left, ${N(1)} in gold on the right. I'll stop on the key moments.`,
+    text: `Let's break this one down. ${N(0)} is marked in blue, ${N(1)} in gold. I'll stop on the key moments.`,
     marks: [{ type: 'tag', f: 0, text: N(0) }, { type: 'tag', f: 1, text: N(1) }],
   });
 
@@ -97,6 +97,27 @@ export function buildScript(res, frames, names, readLines = []) {
     if (aO > MOVE) pm.push({ type: 'move', f: other, dir: 1, text: 'Presses' });
     if (aO < -MOVE) pm.push({ type: 'move', f: other, dir: -1, text: 'Backs up' });
     beats.push({ t: tp, kind: 'position', label, text: parts.join(' '), marks: pm });
+
+    // 1b. the feint or level change that sets it up gets its own stop
+    if (ex.feint) {
+      const fe = ex.feint, me = N(fe.f), opp = N(1 - fe.f), glove = fe.hand === 'left' ? 15 : 16;
+      const what = fe.role === 'lead' ? 'the jab' : 'the rear hand';
+      beats.push({
+        t: fe.tEnd, kind: 'feint', label,
+        text: `Watch this. ${me} shows ${what} but doesn't throw it. That's a feint${fe.reaction ? `, and ${opp} reacts to it` : ''}. It's there to draw a response, and open the door for the ${lowerName(fe.followedBy.label)}.`,
+        marks: [{ type: 'ring', f: fe.f, j: glove }, { type: 'tag', f: fe.f, text: 'FEINT' }, ...(fe.reaction ? [{ type: 'tag', f: 1 - fe.f, text: 'Reacts' }] : [])],
+      });
+    }
+    if (ex.level) {
+      const lv = ex.level, p = lv.followedBy, me = N(lv.f);
+      beats.push({
+        t: lv.t + 0.12, kind: 'level', label,
+        text: p.target === 'body' ? `See ${me} change levels here. Dropping the height brings the body shot into range, and it's hard to see coming.`
+          : /uppercut/.test(p.label) ? `${me} dips down first. From down there, the uppercut comes straight up the middle.`
+            : `${me} changes levels here. It hides where the next punch is coming from.`,
+        marks: [{ type: 'spot', f: lv.f }, { type: 'tag', f: lv.f, text: 'LEVEL CHANGE' }],
+      });
+    }
 
     // 2. the setup and the counter (at most two punch stops per exchange)
     const stops = [];

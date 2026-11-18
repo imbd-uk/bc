@@ -63,10 +63,28 @@ export function analyse(frames) {
   const refIn = findRefIn();
   // no punches are counted while a fighter is down and being counted, or while the referee is between them
   const quiet = [...knockdowns.map((kd) => [kd.t, kd.tEnd + A.COUNT_PAUSE]), ...refIn.map((r) => [r.t, r.tEnd])];
+  const inQuiet = (t) => quiet.some(([a, b]) => t >= a && t <= b);
   let punches = [];
+  const feintCands = [];
   for (const k of [0, 1]) punches.push(...detect(k));
-  punches = punches.filter((p) => !quiet.some(([a, b]) => p.t >= a && p.t <= b));
+  punches = punches.filter((p) => !inQuiet(p.t));
   punches.sort((a, b) => a.t - b.t);
+
+  // feints only count when they do something: the opponent reacts, or a real punch follows
+  const motion = [0, 1].map(motionSeries);
+  const motionNoise = motion.map((m) => { const v = m.map((x) => x.v).filter((x) => x > 0.05).sort((a, b) => a - b); return v.length ? v[v.length >> 1] : 0.5; });
+  const feints = feintCands.filter((c) => !inQuiet(c.t)).map((c) => {
+    const o = 1 - c.f;
+    const peak = Math.max(0, ...motion[o].filter((x) => x.t > c.t && x.t <= c.t + 0.45).map((x) => x.v));
+    // the opponent throwing their own punch isn't a reaction to the feint
+    const oppPunched = punches.some((p) => p.f === o && p.t > c.t - 0.1 && p.t <= c.t + 0.5);
+    c.reaction = !oppPunched && peak > Math.max(1.6, 2.5 * motionNoise[o]);
+    c.followedBy = punches.find((p) => p.f === c.f && p.t > c.t + 0.1 && p.t - c.t <= 0.9) || null;
+    return c;
+  }).filter((c) => c.reaction || c.followedBy).sort((a, b) => a.t - b.t);
+  const levels = [0, 1].flatMap(findLevelChanges).filter((l) => !inQuiet(l.t)).sort((a, b) => a.t - b.t);
+  for (const l of levels) l.followedBy = punches.find((p) => p.f === l.f && p.t >= l.t - 0.1 && p.t - l.t <= 0.9) || null;
+
   const exchanges = group(punches);
   for (const ex of exchanges) describe(ex);
 
@@ -90,8 +108,13 @@ export function analyse(frames) {
 
   const duration = frames.length ? frames[frames.length - 1].t - frames[0].t : 0;
   return {
-    punches, exchanges, duration, knockdowns, refIn,
-    stats: [0, 1].map((k) => fighterStats(k, punches, exchanges, duration, knockdowns)),
+    punches, exchanges, duration, knockdowns, refIn, feints, levels,
+    stats: [0, 1].map((k) => ({
+      ...fighterStats(k, punches, exchanges, duration, knockdowns),
+      feints: feints.filter((x) => x.f === k).length,
+      feintReactions: feints.filter((x) => x.f === k && x.reaction).length,
+      levels: levels.filter((x) => x.f === k).length,
+    })),
     coverage: series.map((s) => s.length / Math.max(1, frames.length)),
     refCoverage: refSeries.length / Math.max(1, frames.length),
   };
@@ -198,6 +221,120 @@ export function analyse(frames) {
         lastT = t;
         out.push(classify(k, sd, t, start, far));
       }
+
+      // feints: a sharp, short move towards the opponent that comes straight back instead of landing
+      const punchTimes = out.filter((p) => p.hand === sd).map((p) => p.t);
+      let lastF = -Infinity;
+      for (let i = 1; i < rows.length - 1; i++) {
+        const t = rows[i].t;
+        if (sv[i] < Math.max(1.5, 0.5 * th) || rows[i].r[sd].vis < 0.5 || t - lastF < 0.5) continue;
+        if (punchTimes.some((x) => Math.abs(x - t) < 0.4)) continue;   // part of a real punch
+        let isPeak = true;
+        for (let j = i - 1; j >= 0 && t - rows[j].t <= A.PEAK_WIN; j--) if (sv[j] > sv[i]) { isPeak = false; break; }
+        for (let j = i + 1; isPeak && j < rows.length && rows[j].t - t <= A.PEAK_WIN; j++) if (sv[j] >= sv[i]) isPeak = false;
+        if (!isPeak) continue;
+        const start = at(t - 0.15);
+        let far = rows[i];
+        for (const r of rows) if (r.t >= t - 0.05 && r.t <= t + 0.2 && r.r[sd].reach > far.r[sd].reach) far = r;
+        const travel = Math.hypot(far.r[sd].rel[0] - start.r[sd].rel[0], far.r[sd].rel[1] - start.r[sd].rel[1]);
+        if (travel < 0.15 || travel >= A.MIN_TRAVEL) continue;          // too small, or a full punch
+        // must start from a settled guard (not hands coming back after a flinch or another move)
+        let before = 0;
+        for (let j = i - 1; j >= 0 && t - rows[j].t <= 0.4; j--) if (t - rows[j].t >= 0.15) before = Math.max(before, sv[j]);
+        if (before > 0.5 * sv[i]) continue;
+        const back = at(far.t + 0.25);
+        if (back.r[sd].reach > far.r[sd].reach - 0.08) continue;         // must come straight back
+        const opp0 = nearest(1 - k, start.t), opp1 = nearest(1 - k, far.t);
+        if (!opp0 || !opp1) continue;
+        const aim = (op) => { const hd = pt(op.p, 0); return hd[2] > 0.3 ? hd : center(op.p); };
+        const approach = (d2(pt(start.p, wMi), aim(opp0)) - d2(pt(far.p, wMi), aim(opp1))) / torso(far.p);
+        if (approach < 0.08) continue;                                    // aimed at the opponent
+        lastF = t;
+        feintCands.push({ f: k, t, tEnd: far.t, hand: sd, role: roleAt(k, sd, t) });
+      }
+    }
+    return out;
+  }
+
+  // lead or rear hand: the lead shoulder is the one nearer the opponent just before t
+  function roleAt(k, hand, t) {
+    const dir = dirAt(k, t);
+    let lead = 0, n = 0;
+    for (const f of series[k]) {
+      if (f.t < t - 0.6 || f.t > t - 0.1) continue;
+      lead += (pt(f.p, 11)[0] - pt(f.p, 12)[0]) * dir; n++;
+    }
+    if (!n) { const f = nearest(k, t); if (f) lead = (pt(f.p, 11)[0] - pt(f.p, 12)[0]) * dir; }
+    return hand === (lead >= 0 ? 'left' : 'right') ? 'lead' : 'rear';
+  }
+
+  // How much a fighter is moving (head and hands, relative to their hips), torso lengths / s.
+  function motionSeries(k) {
+    const s = series[k];
+    const out = [];
+    for (let i = 1; i < s.length; i++) {
+      const a = s[i - 1], b = s[i], dt = b.t - a.t;
+      if (dt <= 0 || dt > 0.12) continue;
+      const L = torso(b.p), ha = mid(pt(a.p, 23), pt(a.p, 24)), hb = mid(pt(b.p, 23), pt(b.p, 24));
+      let v = 0;
+      for (const mi of [0, 15, 16]) {
+        const pa = pt(a.p, mi), pb = pt(b.p, mi);
+        if (pa[2] < 0.4 || pb[2] < 0.4) continue;
+        v = Math.max(v, Math.hypot((pb[0] - hb[0]) - (pa[0] - ha[0]), (pb[1] - hb[1]) - (pa[1] - ha[1])) / L / dt);
+      }
+      out.push({ t: b.t, v });
+    }
+    return out;
+  }
+
+  // Level changes: the fighter drops their height fast, against their own stance and the opponent's hips.
+  function findLevelChanges(k) {
+    const s = series[k];
+    if (s.length < 10) return [];
+    const L = torsoAvg[k];
+    const rows = [];
+    for (const f of s) {
+      const nose = pt(f.p, 0), hp = mid(pt(f.p, 23), pt(f.p, 24));
+      if (nose[2] < 0.5 || pt(f.p, 23)[2] < 0.5) continue;
+      if (isDown(f.p, L)) continue;
+      const op = nearest(1 - k, f.t);
+      if (!op) continue;   // a level change only matters with the opponent in front of them
+      const opHip = pt(op.p, 23)[2] > 0.5 ? mid(pt(op.p, 23), pt(op.p, 24))[1] : null;
+      // head height above the shoulders, measured in this frame's own body size, so camera zoom doesn't fake it
+      const sh = mid(pt(f.p, 11), pt(f.p, 12));
+      rows.push({ t: f.t, h1: (sh[1] - nose[1]) / torso(f.p), hip: hp[1], opHip });
+    }
+    const med = (arr) => { const v = arr.filter((x) => x != null).sort((a, b) => a - b); return v.length >= 5 ? v[v.length >> 1] : null; };
+    // How far below normal this fighter is: bending at the waist (head towards hips), or bending the
+    // knees (hips lower in the picture). For the knees, a camera tilt moves both fighters the same way,
+    // so take the smaller of "my drop" and "my drop minus the opponent's": the opponent standing up
+    // or the camera moving doesn't count as me dipping.
+    const depthAt = (x, b) => {
+      const waist = b.h1 != null ? b.h1 - x.h1 : 0;
+      let knees = 0;
+      if (b.hip != null) {
+        const mine = (x.hip - b.hip) / L;
+        knees = x.opHip != null && b.opHip != null ? Math.min(mine, mine - (x.opHip - b.opHip) / L) : 0;
+      }
+      return Math.max(waist, knees);
+    };
+    const out = [];
+    let lastT = -Infinity;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.t - lastT < 1.0) continue;
+      const past = rows.filter((x) => x.t >= r.t - 2 && x.t <= r.t - 0.5);
+      const b = { h1: med(past.map((x) => x.h1)), hip: med(past.map((x) => x.hip)), opHip: med(past.map((x) => x.opHip)) };
+      const depth = depthAt(r, b);
+      if (depth < 0.22) continue;
+      // fast: close to normal height half a second earlier
+      const before = rows.filter((x) => x.t >= r.t - 0.5 && x.t <= r.t - 0.35);
+      if (!before.some((x) => depthAt(x, b) < 0.08)) continue;
+      // held at least briefly (not a tracking blip)
+      const hold = rows.filter((x) => x.t > r.t && x.t <= r.t + 0.15);
+      if (!hold.length || !hold.every((x) => depthAt(x, b) >= 0.15)) continue;
+      lastT = r.t;
+      out.push({ f: k, t: r.t, depth });
     }
     return out;
   }
@@ -285,8 +422,27 @@ export function analyse(frames) {
           notes.push({ k: 'counter', text: counterText(who, hit, c, gap) + (r.punches.length > 1 ? `, then ${r.punches.slice(1).map(pName).join(', ')}` : '') });
         } else notes.push({ k: 'lead', text: `${who} ${prev.f === r.f ? 'goes again' : 'answers'} with ${list}` });
       }
-      // setups inside the run
+      // what came just before this combination: a feint, a level change
       const first = r.punches[0];
+      const fe = feints.find((x) => x.f === r.f && x.followedBy === first);
+      if (fe) {
+        ex.feint = ex.feint || fe;
+        const what = fe.role === 'lead' ? 'the jab' : 'the rear hand';
+        notes.push({ k: 'feint', text: `${who} feints ${what} first${fe.reaction ? `, and {${1 - r.f}} reacts to it` : ''}, then throws ${pName(first)}` });
+      }
+      const lv = levels.find((x) => x.f === r.f && r.punches.includes(x.followedBy));
+      if (lv) {
+        ex.level = ex.level || lv;
+        const p = lv.followedBy;
+        notes.push({
+          k: 'level',
+          text: p.target === 'body' ? `${who} changes levels and digs ${pName(p)}`
+            : /uppercut/.test(p.label) ? `${who} dips down, then comes up with ${pName(p)}`
+              : `${who} changes levels to disguise ${pName(p)}`,
+        });
+      }
+
+      // setups inside the run
       if (seq.length >= 2 && seq[0] === 'jab' && seq[1] === 'jab') notes.push({ k: 'setup', text: `${who} doubles the jab to close the distance` });
       const power = r.punches.find((p, j) => j > 0 && p.role === 'rear');
       if (first.label === 'jab' && power) notes.push({ k: 'setup', text: `The jab sets up the ${pName(power, true)}` });
@@ -370,6 +526,8 @@ export function insights(res, names) {
     if (s.topPair) out.push(`${nm}'s go-to: ${s.topPair.seq.map((l) => NAMES[l].toLowerCase()).join(' → ')} (${s.topPair.n} times).`);
     if (s.total >= 6 && (s.by.jab || 0) / s.total >= 0.4) out.push(`${nm} lives off the jab (${Math.round(((s.by.jab || 0) / s.total) * 100)}% of punches).`);
     if (s.bodyPct != null && s.total >= 6 && s.bodyPct >= 0.3) out.push(`${nm} invests in the body (${Math.round(s.bodyPct * 100)}% of shots).`);
+    if (s.feints >= 3) out.push(`${nm} feinted ${s.feints} times${s.feintReactions ? ` and drew ${s.feintReactions} reaction${s.feintReactions > 1 ? 's' : ''}` : ''}: setting traps rather than just throwing.`);
+    if (s.levels >= 3) out.push(`${nm} changed levels ${s.levels} times, mixing up where the punches come from.`);
   }
   if (a.total && b.total) {
     const more = a.total > b.total ? 0 : 1, r = res.stats[more].total / Math.max(1, res.stats[1 - more].total);
@@ -419,6 +577,12 @@ export function initBreakdown({ root }) {
         <p class="bd-who-title">Who's who?</p>
         <p class="sheet-note">Tap a box to change it: Fighter A → Fighter B → Referee → Ignore. It keeps track of them from here,
         even when they swap sides.</p>
+        <div class="bd-names">
+          <label class="bd-name f0"><span><i class="dot"></i>Fighter A is</span>
+            <input data-k="wn0" maxlength="24" placeholder="Type their name" autocomplete="off" aria-label="Fighter A's name"></label>
+          <label class="bd-name f1"><span><i class="dot"></i>Fighter B is</span>
+            <input data-k="wn1" maxlength="24" placeholder="Type their name" autocomplete="off" aria-label="Fighter B's name"></label>
+        </div>
         <div class="row-btns"><button type="button" class="mini primary-mini" data-k="whook">Looks right, analyse</button>
           <button type="button" class="mini" data-k="whonext">Try a later frame</button></div>
       </div>
@@ -440,6 +604,14 @@ export function initBreakdown({ root }) {
     $('quality').querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
   });
   for (const k of ['n0', 'n1']) $(k).addEventListener('input', () => { if (result) render(); });
+  // names typed in the who's-who step become the fighters' names everywhere (boxes, write-up, voice-over)
+  for (const i of [0, 1]) {
+    $(`wn${i}`).addEventListener('input', () => {
+      $(`n${i}`).value = $(`wn${i}`).value.trim() || `Fighter ${'AB'[i]}`;
+      drawSetup();
+      if (result) render();
+    });
+  }
   $('file').addEventListener('change', () => { const f = $('file').files[0]; $('file').value = ''; if (f) run(f); });
   $('stop').addEventListener('click', () => finish());
 
@@ -543,6 +715,8 @@ export function initBreakdown({ root }) {
     return new Promise((resolve) => {
       const show = (f) => {
         setup = { ...f, roles: Tracker.guess(f.dets, f.apps) };
+        // prefill with names already typed (but not the "Fighter A" defaults)
+        for (const i of [0, 1]) { const v = $(`n${i}`).value.trim(); $(`wn${i}`).value = /^Fighter [AB]$/.test(v) ? '' : v; }
         $('who').hidden = false;
         overlay.classList.add('picking');
         drawSetup();
@@ -645,7 +819,11 @@ export function initBreakdown({ root }) {
     video.pause();
     $('progress').hidden = true;
     result = analyse(frames);
-    if (result.coverage.some((c) => c < 0.3)) {
+    const secs = Math.max(1, (frames.length ? frames[frames.length - 1].t : video.currentTime) || video.duration || 1);
+    if (frames.length < secs * 3) {
+      $('status').textContent = 'Only part of the clip could be read (the app was probably in the background). Keep it open on screen and try again.';
+      $('status').classList.add('error');
+    } else if (result.coverage.some((c) => c < 0.3)) {
       $('status').textContent = 'Heads up: one fighter was only tracked for part of the clip, so some punches may be missing.';
     }
     video.controls = true; video.playbackRate = 1;
@@ -679,13 +857,19 @@ export function initBreakdown({ root }) {
     while (lo < hi) { const m = (lo + hi) >> 1; if (frames[m].t < t) lo = m + 1; else hi = m; }
     const fr = frames[lo];
     if (!fr || Math.abs(fr.t - t) > 0.3) return;
+    // hold each person's last pose for a moment when the model misses them, so labels don't flicker
+    const held = (get) => {
+      for (let j = lo; j >= 0 && fr.t - frames[j].t <= 0.3; j--) { if (frames[j].cut && j !== lo) break; const p = get(frames[j]); if (p) return p; }
+      return null;
+    };
     const head = (p) => { const q = pt(p, 0); return [ox + q[0] * sc, oy + q[1] * sc]; };
-    if (fr.ref) {
-      drawSkeleton(fr.ref, REF_COLOR, sc, ox, oy, 0.6);
-      const h = head(fr.ref); tag('REF', h[0], h[1] - 26, REF_COLOR);
+    const refP = held((f) => f.ref);
+    if (refP) {
+      drawSkeleton(refP, REF_COLOR, sc, ox, oy, 0.6);
+      const h = head(refP); tag('REF', h[0], h[1] - 26, REF_COLOR);
     }
     const nm = names();
-    fr.poses.forEach((p, k) => {
+    [0, 1].map((k) => held((f) => f.poses[k])).forEach((p, k) => {
       if (!p) return;
       drawSkeleton(p, COLORS[k], sc, ox, oy);
       const h = head(p);
@@ -693,6 +877,8 @@ export function initBreakdown({ root }) {
       if (result) {
         if (result.knockdowns.some((kd) => kd.f === k && t >= kd.t && t <= kd.tEnd + 1.5)) labels.push(['KNOCKDOWN', '#ff6b6b']);
         for (const q of result.punches) if (q.f === k && t >= q.t - 0.1 && t <= q.t + 0.5) labels.push([NAMES[q.label] + (q.target === 'body' ? ' (body)' : ''), COLORS[k]]);
+        for (const q of result.feints) if (q.f === k && t >= q.t - 0.1 && t <= q.t + 0.6) labels.push([q.role === 'lead' ? 'Jab feint' : 'Feint', '#e6b3ff']);
+        for (const q of result.levels) if (q.f === k && t >= q.t - 0.1 && t <= q.t + 0.6) labels.push(['Level change', '#9be7ff']);
       }
       if (!labels.length) labels.push([nm[k], COLORS[k]]);
       labels.forEach(([txt, col], i) => tag(txt, h[0], h[1] - 26 - i * 24, col, i === 0));
@@ -785,6 +971,14 @@ export function initBreakdown({ root }) {
       const d = document.createElement('i'); d.className = `bd-dot f${p.f}`; d.style.left = `${(p.t / dur) * 100}%`;
       tl.append(d);
     }
+    for (const fe of res.feints) {
+      const d = document.createElement('i'); d.className = `bd-feint f${fe.f}`; d.style.left = `${(fe.t / dur) * 100}%`; d.title = `${nm[fe.f]} feint`;
+      tl.append(d);
+    }
+    for (const lv of res.levels) {
+      const d = document.createElement('i'); d.className = `bd-level f${lv.f}`; d.style.left = `${(lv.t / dur) * 100}%`; d.title = `${nm[lv.f]} level change`;
+      tl.append(d);
+    }
     for (const kd of res.knockdowns) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'bd-kd';
       b.style.left = `${(kd.t / dur) * 100}%`; b.title = `Knockdown: ${nm[kd.f]} down`; b.setAttribute('aria-label', `Watch the knockdown at ${fmt(kd.t)}`);
@@ -824,7 +1018,7 @@ export function initBreakdown({ root }) {
       const h = document.createElement('p'); h.className = `card-title f${k}`;
       h.textContent = nm[k] + (s.scored ? ` · ${s.scored} knockdown${s.scored > 1 ? 's' : ''}` : '') + (s.suffered ? ` · down ${s.suffered}×` : '');
       const st = document.createElement('div'); st.className = 'bd-stats';
-      for (const [v, l] of [[s.total, 'Punches'], [s.led, 'Led'], [s.counters, 'Counters'], [s.bodyPct == null ? '–' : `${Math.round(s.bodyPct * 100)}%`, 'Body']]) {
+      for (const [v, l] of [[s.total, 'Punches'], [s.led, 'Led'], [s.counters, 'Counters'], [s.bodyPct == null ? '–' : `${Math.round(s.bodyPct * 100)}%`, 'Body'], [s.feints, 'Feints'], [s.levels, 'Level chg']]) {
         const d = document.createElement('div'); d.className = 'stat';
         d.innerHTML = `<span class="v"></span><span class="k"></span>`;
         d.firstChild.textContent = v; d.lastChild.textContent = l; st.append(d);

@@ -62,7 +62,7 @@ export class Sampler {
   }
   // Returns true when this frame looks like a camera cut.
   grab(video) {
-    const vw = video.videoWidth, vh = video.videoHeight;
+    const vw = video.videoWidth || video.width, vh = video.videoHeight || video.height;
     const W = 320, H = Math.max(1, Math.round((320 * vh) / vw));
     if (this.c.width !== W || this.c.height !== H) { this.c.width = W; this.c.height = H; }
     this.s = W / vw;
@@ -109,8 +109,53 @@ export class Sampler {
       return this.patch(W[0] + (W[0] - E[0]) * 0.2, W[1] + (W[1] - E[1]) * 0.2, 0.07 * L);
     }));
     const trunks = this.patch(hp[0], hp[1] + 0.12 * L, 0.12 * L);
-    return { face, torso: tor, arm, hand, trunks };
+    // colour histogram of the trunks / waist area: the most reliable way to tell two fighters apart
+    const hw = Math.max(d2(pt(p, 23), pt(p, 24)) * 0.8, 0.25 * L);
+    const th = this.hist(hp[0] - hw, hp[1] - 0.05 * L, hp[0] + hw, hp[1] + 0.35 * L);
+    return { face, torso: tor, arm, hand, trunks, th };
   }
+  // Normalised colour histogram (3 lightness x 6 x 6 colour bins) of a rectangle in video px.
+  hist(x0, y0, x1, y1) {
+    const { img, s } = this;
+    if (!img) return null;
+    const X0 = Math.max(0, Math.floor(x0 * s)), Y0 = Math.max(0, Math.floor(y0 * s));
+    const X1 = Math.min(img.width - 1, Math.ceil(x1 * s)), Y1 = Math.min(img.height - 1, Math.ceil(y1 * s));
+    if (X1 <= X0 || Y1 <= Y0) return null;
+    const h = new Float32Array(108);
+    const step = Math.max(1, Math.floor(Math.sqrt(((X1 - X0) * (Y1 - Y0)) / 400)));
+    let n = 0;
+    for (let y = Y0; y <= Y1; y += step) for (let x = X0; x <= X1; x += step) {
+      const i = (y * img.width + x) * 4;
+      const [l, a, b] = srgbToLab(img.data[i], img.data[i + 1], img.data[i + 2]);
+      const li = l < 35 ? 0 : l < 65 ? 1 : 2;
+      const ai = Math.min(5, Math.max(0, Math.floor((a + 30) / 10)));
+      const bi = Math.min(5, Math.max(0, Math.floor((b + 30) / 13)));
+      h[li * 36 + ai * 6 + bi]++; n++;
+    }
+    if (!n) return null;
+    for (let k = 0; k < 108; k++) h[k] /= n;
+    return h;
+  }
+}
+
+// Hellinger distance between two histograms: 0 = identical, 1 = nothing in common.
+function histDist(a, b) {
+  if (!a || !b) return null;
+  let bc = 0;
+  for (let k = 0; k < a.length; k++) bc += Math.sqrt(a[k] * b[k]);
+  return Math.sqrt(Math.max(0, 1 - bc));
+}
+
+// The pose model sometimes returns the same person twice: keep the clearer copy.
+export function dedupe(dets, apps) {
+  const keep = dets.map(() => true);
+  const vis = (p) => [0, 11, 12, 23, 24].reduce((s, mi) => s + pt(p, mi)[2], 0);
+  for (let i = 0; i < dets.length; i++) for (let j = i + 1; j < dets.length; j++) {
+    if (!keep[i] || !keep[j]) continue;
+    const L = Math.min(torso(dets[i]), torso(dets[j]));
+    if (d2(center(dets[i]), center(dets[j])) < 0.4 * L) { if (vis(dets[i]) >= vis(dets[j])) keep[j] = false; else keep[i] = false; }
+  }
+  return { dets: dets.filter((_, i) => keep[i]), apps: apps.filter((_, i) => keep[i]) };
 }
 
 // Higher = more like a referee (shirt with sleeves, often white, bare hands).
@@ -125,30 +170,53 @@ export function refScore(app) {
 }
 export const REF_THRESHOLD = 0.8;
 
-function sigOf(app) { return { trunks: app?.trunks || null, torso: app?.torso || null, hand: app?.hand || null }; }
-function sigDist(app, sig) {
-  if (!app || !sig) return 0.5;
+// A person's look: trunks histogram + trunks, glove, skin and face colours.
+function sigOf(app) {
+  return { th: app?.th || null, trunks: app?.trunks || null, torso: app?.torso || null, hand: app?.hand || null, face: app?.face || null };
+}
+function oneDist(app, sig) {
   let s = 0, w = 0;
-  for (const [k, wt] of [['trunks', 1], ['hand', 0.6], ['torso', 0.5]]) {
+  const h = histDist(app.th, sig.th);
+  if (h != null) { s += 1.4 * Math.min(1, h * 1.6); w += 1.4; }
+  for (const [k, wt] of [['trunks', 0.6], ['hand', 0.6], ['torso', 0.5], ['face', 0.3]]) {
     const d = dE(app[k], sig[k]);
     if (d != null) { s += wt * Math.min(d, 60) / 30; w += wt; }
   }
   return w ? s / w : 0.5;
 }
-function blendSig(sig, app, a = 0.08) {
-  for (const k of ['trunks', 'torso', 'hand']) {
-    if (!app?.[k]) continue;
-    sig[k] = sig[k] ? sig[k].map((v, i) => v * (1 - a) + app[k][i] * a) : app[k].slice();
-  }
+// Distance to the closest of the person's remembered looks (the "look bank").
+function sigDist(app, bank) {
+  if (!app || !bank) return 0.5;
+  const list = Array.isArray(bank) ? bank : [bank];
+  if (!list.length) return 0.5;
+  return Math.min(...list.map((s) => oneDist(app, s)));
+}
+// Remember a new look when it's confidently this person but different from what we have
+// (new camera angle, lighting, side of the ring).
+function addLook(bank, app) {
+  if (!app) return;
+  const d = sigDist(app, bank);
+  if (d < 0.18) return;
+  bank.push(sigOf(app));
+  if (bank.length > 12) bank.splice(2, 1);   // keep the confirmed first looks
 }
 
 // ---------------------------------------------------------------- tracker
 // Tracks: 0 = Fighter A, 1 = Fighter B, 2 = referee.
 export class Tracker {
-  constructor(width) { this.width = width; this.gate = width * 0.25; this.tracks = [0, 1, 2].map(() => ({ pos: null, sig: null, seen: -Infinity })); this.t = 0; }
+  constructor(width) { this.width = width; this.gate = width * 0.25; this.tracks = [0, 1, 2].map(() => ({ pos: null, bank: null, seen: -Infinity })); this.t = 0; }
 
   // Best guess at roles for a set of people: 'A' | 'B' | 'R' | null per detection.
-  static guess(dets, apps) {
+  static guess(dets0, apps0) {
+    const { dets, apps } = dedupe(dets0, apps0);
+    const map = dets.map((d) => dets0.indexOf(d));
+    const r = Tracker.guessRaw(dets, apps);
+    const out = new Array(dets0.length).fill(null);
+    r.forEach((role, i) => { out[map[i]] = role; });
+    return out;
+  }
+
+  static guessRaw(dets, apps) {
     const n = dets.length, roles = new Array(n).fill(null);
     if (!n) return roles;
     const scores = apps.map(refScore);
@@ -173,14 +241,15 @@ export class Tracker {
     roles.forEach((r, i) => {
       const k = r === 'A' ? 0 : r === 'B' ? 1 : r === 'R' ? 2 : -1;
       if (k < 0) return;
-      this.tracks[k] = { pos: center(dets[i]), sig: sigOf(apps[i]), seen: 0 };
+      this.tracks[k] = { pos: center(dets[i]), bank: [sigOf(apps[i])], seen: 0 };
     });
     this.ready = true;
   }
 
   // -> [poseA, poseB, poseRef] (null where not seen this frame)
-  update(dets, apps, cut, t = 0) {
+  update(dets0, apps0, cut, t = 0) {
     this.t = t;
+    const { dets, apps } = dedupe(dets0, apps0);
     if (!this.ready) {
       if (dets.length < 2) return [null, null, null];
       this.init(dets, apps, Tracker.guess(dets, apps));
@@ -194,17 +263,30 @@ export class Tracker {
       const tr = this.tracks[k];
       const stale = t - tr.seen > 1.0;
       const pos = cut || !tr.pos || stale ? 0.4 : Math.min(2, d2(cs[i], tr.pos) / this.gate);
-      const app = sigDist(apps[i], tr.sig);
+      const app = sigDist(apps[i], tr.bank);
       const role = k === 2 ? Math.max(0, REF_THRESHOLD + 0.2 - scores[i]) * 0.9 : Math.max(0, scores[i] - 0.2) * 1.4;
+      // looking like one of the OTHER people we know is strong evidence it isn't this one
+      let other = 0;
+      for (const j of [0, 1, 2]) {
+        const o = this.tracks[j];
+        if (j === k || !o.bank) continue;
+        const dOther = sigDist(apps[i], o.bank);
+        if (tr.bank && dOther + 0.1 < app) other = Math.max(other, (app - dOther) * 1.2);
+      }
       // a slot nobody has filled yet must not grab someone who looks like a person we already know
       let lookalike = 0;
-      if (!tr.sig) {
+      if (!tr.bank) {
+        lookalike = 0.6;   // filling an empty slot needs real evidence
         for (const j of [0, 1, 2]) {
-          if (j === k || !this.tracks[j].sig) continue;
-          lookalike = Math.max(lookalike, Math.max(0, 0.7 - sigDist(apps[i], this.tracks[j].sig)) * 3);
+          const o = this.tracks[j];
+          if (j === k || !o.bank) continue;
+          lookalike = Math.max(lookalike, 0.6 + Math.max(0, 0.7 - sigDist(apps[i], o.bank)) * 3);
+          // standing where someone we know was a moment ago: it's them, not a new person
+          if (o.pos && t - o.seen < 1.5 && d2(cs[i], o.pos) < 1.2 * sizes[i]) lookalike += 2.5;
         }
       }
-      return (cut ? 0.2 : 0.6) * pos + (cut ? 1.4 : 0.8) * app + role + lookalike;
+      // appearance leads; position only breaks ties (and counts for nothing after a camera cut)
+      return (cut ? 0.1 : 0.45) * pos + (cut ? 1.6 : 1.1) * app + other + role + lookalike;
     };
     const MISS = 1.3;
     let best = { c: Infinity, a: [-1, -1, -1] };
@@ -219,8 +301,10 @@ export class Tracker {
     return best.a.map((i, k) => {
       if (i < 0) return null;
       const tr = this.tracks[k];
+      const c = cost(k, i);
       tr.pos = cs[i]; tr.seen = t;
-      if (!tr.sig) tr.sig = sigOf(apps[i]); else if (cost(k, i) < 1.2) blendSig(tr.sig, apps[i]);
+      if (!tr.bank) tr.bank = [sigOf(apps[i])];
+      else if (c < 0.7 && !cut) addLook(tr.bank, apps[i]);   // only learn new looks when we're sure
       return dets[i];
     });
   }
@@ -234,11 +318,17 @@ export function isDown(p, standL) {
   if (pt(p, 11)[2] < 0.4 || pt(p, 23)[2] < 0.4) return false;
   const dx = sh[0] - hp[0], dy = hp[1] - sh[1];   // dy > 0 when shoulders are above hips
   const tilt = Math.atan2(Math.abs(dx), dy) * 180 / Math.PI;   // 0 = upright
+  const L = d2(sh, hp);
+  if (L < 0.55 * standL && tilt < 40) return false;   // squashed, unreliable pose (turned away, cropped)
   if (tilt > 55) return true;
-  const ankles = [27, 28].map((mi) => pt(p, mi)).filter((q) => q[2] > 0.4);
+  // shoulders down near the feet: only trust feet the model can really see, below the hips
+  // (when the legs are out of shot the model guesses ankles, often in impossible places)
+  const ankles = [[25, 27], [26, 28]].map(([k, a]) => [pt(p, k), pt(p, a)])
+    .filter(([k, a]) => k[2] > 0.6 && a[2] > 0.6 && a[1] > hp[1] + 0.2 * standL && k[1] > hp[1])
+    .map(([, a]) => a);
   if (ankles.length) {
     const floor = Math.max(...ankles.map((q) => q[1]));
-    if (floor - sh[1] < 1.15 * standL) return true;   // shoulders down near the feet
+    if (floor - sh[1] < 1.15 * standL) return true;
   }
   return false;
 }

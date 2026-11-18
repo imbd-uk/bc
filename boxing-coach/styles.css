@@ -225,17 +225,29 @@ label.btn { cursor: pointer; }
 .bd-stage canvas.picking { pointer-events: auto; cursor: pointer; }
 .bd-who { display: grid; gap: 8px; padding: 4px 2px; }
 .bd-who-title { margin: 0; font-weight: 700; }
+.bd-names { display: grid; gap: 8px; }
+.bd-name { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+.bd-name .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; margin-right: 7px; vertical-align: 1px; }
+.bd-name input {
+  min-width: 0; padding: 9px 11px; border-radius: 10px; font: inherit; font-size: 15px; font-weight: 500; color: var(--fg);
+  background: rgba(255,255,255,0.06); border: 1px solid currentColor;
+}
 .mini.primary-mini { background: var(--fg); color: #08090a; font-weight: 600; border-color: transparent; }
 .row-label .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; margin-right: 8px; vertical-align: 1px; }
 .bd-notes .n-knockdown { color: #ff8f8f; font-weight: 600; }
 .bd-notes .n-knockdown::marker { color: #ff6b6b; }
 .bd-notes .n-ref::marker { color: #c9ced6; }
+.bd-notes .n-feint::marker { color: #e6b3ff; }
+.bd-notes .n-level::marker { color: #9be7ff; }
+.bd-feint, .bd-level { position: absolute; width: 0; height: 0; pointer-events: none; transform: translateX(-4px); }
+.bd-feint { top: 13px; border: 4px solid transparent; border-top-color: #e6b3ff; }
+.bd-level { bottom: 13px; border: 4px solid transparent; border-bottom-color: #9be7ff; }
 .bd-legend { display: flex; gap: 16px; font-size: 13px; font-weight: 600; }
 .bd-legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: currentColor; margin-right: 6px; }
 .bd-results { display: flex; flex-direction: column; gap: 14px; }
 .bd-fighters { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .bd-fighter .card-title { font-size: 15px; color: inherit; }
-.bd-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.bd-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
 .bd-stats .v { color: var(--fg); }
 .section-title { margin: 8px 2px 0; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
 .bd-card { display: grid; gap: 10px; }
