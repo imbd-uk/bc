@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Boxing Coach</title>
+<meta name="description" content="Shadow boxing coach that calls your punches in real time. Runs entirely on your phone.">
+<meta name="theme-color" content="#050607">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Boxing Coach">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<canvas id="bg" aria-hidden="true"></canvas>
+
+<!-- ============================== PAGES ============================== -->
+<div id="shell">
+
+  <!-- ANALYSE -->
+  <section class="page" id="page-analyse" data-page="analyse">
+    <header class="page-head">
+      <p class="eyebrow">Boxing Coach</p>
+      <h1>Shadow box.<br><span class="dim">Get every punch called.</span></h1>
+    </header>
+
+    <button id="model-card" class="card model-card" type="button">
+      <span class="model-dot" id="model-dot"></span>
+      <span class="model-text">
+        <span class="model-title" id="model-title">Starter model</span>
+        <span class="model-sub" id="model-sub">Teach it your punches for better accuracy</span>
+      </span>
+      <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+
+    <div class="card">
+      <div class="row">
+        <span class="row-label" id="lbl-camera">Camera</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-camera" data-setting="camera">
+          <button type="button" role="radio" data-value="user">Front</button>
+          <button type="button" role="radio" data-value="environment">Back</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="row-label" id="lbl-round">Rounds</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-round" data-setting="round">
+          <button type="button" role="radio" data-value="0">Off</button>
+          <button type="button" role="radio" data-value="120">2 min</button>
+          <button type="button" role="radio" data-value="180">3 min</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="row-label" id="lbl-voice">Voice calls</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-voice" data-setting="voice">
+          <button type="button" role="radio" data-value="on">On</button>
+          <button type="button" role="radio" data-value="off">Off</button>
+        </div>
+      </div>
+      <div class="row" id="row-model" hidden>
+        <span class="row-label" id="lbl-model">Model</span>
+        <div class="seg" role="radiogroup" aria-labelledby="lbl-model" data-setting="model">
+          <button type="button" role="radio" data-value="personal">Mine</button>
+          <button type="button" role="radio" data-value="starter">Starter</button>
+        </div>
+      </div>
+    </div>
+
+    <button id="btn-start" class="btn primary" type="button" disabled>Loading coach…</button>
+    <label class="btn ghost" for="file-input">Analyse a recorded video</label>
+    <input id="file-input" type="file" accept="video/*" hidden>
+    <p id="status" class="status" role="status"></p>
+
+    <div class="card last" id="last-card" hidden>
+      <p class="card-title">Last session</p>
+      <div class="stats4" id="last-stats"></div>
+    </div>
+
+    <p class="foot-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Your camera is processed on this phone. Nothing is uploaded or saved.</p>
+  </section>
+
+  <!-- TEACH -->
+  <section class="page" id="page-teach" data-page="teach" hidden>
+    <header class="page-head">
+      <p class="eyebrow">Teach the AI</p>
+      <h1>Train it on <span class="dim">your</span> punches.</h1>
+      <p class="lede">Throw each punch when asked. The app learns your style and your camera angle, on this phone.</p>
+    </header>
+
+    <div class="card score-card" id="score-card" hidden>
+      <div class="score">
+        <span class="score-num" id="score-num">–</span>
+        <span class="score-label">Self-test accuracy</span>
+      </div>
+      <p class="score-note" id="score-note"></p>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Your examples</p>
+      <ul class="punch-list" id="punch-list"></ul>
+    </div>
+
+    <button id="btn-teach" class="btn primary" type="button" disabled>Loading coach…</button>
+    <p class="hint-text">Stand where you'll train. Throw one clean punch at a time and return to guard.</p>
+    <button id="btn-clear" class="btn text danger" type="button" hidden>Delete my model</button>
+  </section>
+
+  <!-- TIPS -->
+  <section class="page" id="page-tips" data-page="tips" hidden>
+    <header class="page-head">
+      <p class="eyebrow">Tips</p>
+      <h1>Set up right, <span class="dim">train better.</span></h1>
+    </header>
+
+    <article class="card tip">
+      <p class="card-title">Phone placement</p>
+      <ul>
+        <li>Chest height, 2–3 m away. Lean it on something steady.</li>
+        <li>Shoulders, elbows, hands and hips must all be in frame.</li>
+        <li>About 45° to the side works better than straight on, especially for jabs.</li>
+        <li>Light in front of you, not behind you.</li>
+      </ul>
+    </article>
+
+    <article class="card tip">
+      <p class="card-title">Getting accurate calls</p>
+      <ul>
+        <li>Run <a href="#teach">Teach the AI</a> once from where you'll train.</li>
+        <li>Snap each punch out and back. Slow pushes don't count.</li>
+        <li>If one punch keeps getting mixed up, redo just that punch.</li>
+        <li>Moved the phone? Teach again. It only takes two minutes.</li>
+      </ul>
+    </article>
+
+    <article class="card tip">
+      <p class="card-title">The four punches</p>
+      <dl class="punch-defs">
+        <dt>Jab</dt><dd>Lead hand, straight out from the chin. Fast, turn the fist over at the end.</dd>
+        <dt>Cross</dt><dd>Rear hand, straight. Pivot the back foot and turn the hips through.</dd>
+        <dt>Hook</dt><dd>Elbow bent about 90°, arm level with the floor. The power comes from turning the body.</dd>
+        <dt>Uppercut</dt><dd>Short upward punch, palm facing you. Dip the knees slightly and drive up.</dd>
+      </dl>
+    </article>
+
+    <article class="card tip">
+      <p class="card-title">Stay safe</p>
+      <ul>
+        <li>Warm up for 5 minutes before you throw anything hard.</li>
+        <li>Don't lock your elbows out at full speed.</li>
+        <li>Keep the space around you clear.</li>
+      </ul>
+    </article>
+  </section>
+
+  <!-- LESSONS -->
+  <section class="page" id="page-lessons" data-page="lessons" hidden>
+    <header class="page-head">
+      <p class="eyebrow">Lessons</p>
+      <h1>Coming <span class="dim">soon.</span></h1>
+    </header>
+    <div class="empty">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></svg>
+      <p class="empty-title">No lessons yet</p>
+      <p class="empty-text">Guided drills and combos will appear here once they're ready.</p>
+    </div>
+  </section>
+</div>
+
+<!-- Tab bar -->
+<nav class="tabbar" aria-label="Sections">
+  <a href="#analyse" data-tab="analyse">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+    <span>Analyse</span>
+  </a>
+  <a href="#teach" data-tab="teach">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="7" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="13" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6.7 8.1l3.7 3.6M17.4 7.3l-4 4.3M10.4 14.2l-3 2.6M13.6 14.2l3 2.6"/></svg>
+    <span>Teach</span>
+  </a>
+  <a href="#tips" data-tab="tips">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/></svg>
+    <span>Tips</span>
+  </a>
+  <a href="#lessons" data-tab="lessons">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></svg>
+    <span>Lessons</span>
+  </a>
+</nav>
+
+<!-- ============================== LIVE STAGE ============================== -->
+<main id="stage" hidden>
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+
+  <!-- Training HUD -->
+  <div id="hud-train" class="hud">
+    <header class="hud-top">
+      <div class="glass clock">
+        <span id="round-label" class="label">Session</span>
+        <span id="clock" class="big num">00:00</span>
+      </div>
+      <div class="glass counts">
+        <div><span id="punch-count" class="big num">0</span><span class="label">Punches</span></div>
+        <div><span id="combo-count" class="big num">0</span><span class="label">Combo</span></div>
+      </div>
+    </header>
+    <div class="pills">
+      <span id="stance" class="pill glass">Finding you…</span>
+      <span id="model-pill" class="pill glass">Starter model</span>
+    </div>
+    <div id="callout" class="callout" aria-live="polite"></div>
+    <footer class="hud-bottom">
+      <ol id="recent" class="recent" aria-label="Recent punches"></ol>
+      <div class="controls">
+        <button id="btn-voice" class="ctl glass" type="button" aria-pressed="true">Voice on</button>
+        <button id="btn-flip" class="ctl glass" type="button">Flip</button>
+        <button id="btn-end" class="ctl end" type="button">End</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Teach HUD -->
+  <div id="hud-teach" class="hud" hidden>
+    <header class="hud-top">
+      <div class="glass teach-step">
+        <span class="label" id="teach-step">Punch 1 of 4</span>
+        <span class="big" id="teach-label">Jab</span>
+      </div>
+      <div class="glass ring-wrap">
+        <svg class="ring" viewBox="0 0 44 44" aria-hidden="true">
+          <circle cx="22" cy="22" r="19" class="ring-bg"/>
+          <circle cx="22" cy="22" r="19" class="ring-fg" id="teach-ring" pathLength="100"/>
+        </svg>
+        <span class="ring-num num" id="teach-count">0/10</span>
+      </div>
+    </header>
+    <div id="teach-center" class="teach-center" aria-live="polite"></div>
+    <footer class="hud-bottom">
+      <p class="teach-msg glass" id="teach-msg">Throw a jab, then back to guard</p>
+      <div class="controls">
+        <button id="btn-undo" class="ctl glass" type="button">Undo last</button>
+        <button id="btn-skip" class="ctl glass" type="button">Skip</button>
+        <button id="btn-finish" class="ctl end" type="button">Finish</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="hint" class="hint glass">Step back until your hips and both hands are in shot</div>
+</main>
+
+<!-- ============================== RESULT SHEET ============================== -->
+<div id="sheet" class="sheet-backdrop" hidden>
+  <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <span class="grabber" aria-hidden="true"></span>
+    <h2 id="sheet-title">Session done</h2>
+    <div id="sheet-body"></div>
+    <button id="btn-sheet-close" class="btn primary" type="button">Done</button>
+  </section>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
