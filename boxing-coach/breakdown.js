@@ -6,84 +6,33 @@
 import { FilesetResolver, PoseLandmarker } from './vendor/vision_bundle.mjs';
 import { NAMES, matchCombo } from './personal.js';
 import { voice } from './voice.js';
+import {
+  BONES, COLORS, REF_COLOR, pt, mid, d2, center, torso, elbowAngle, packPose, box, Sampler, Tracker, isDown, refScore,
+} from './people.js';
 
-// MediaPipe landmarks we keep per pose (x px, y px, visibility).
-const KEEP = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
-const SLOT = Object.fromEntries(KEEP.map((mi, i) => [mi, i]));
-const BONES = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28]];
-const COLORS = ['#b9d4ff', '#ffcf70'];
+export { BONES, COLORS, pt, mid, center, torso, packPose, Tracker };
 
 const A = {
-  SPEED: 2.0,         // wrist speed (torso lengths / s) that can start a punch
+  SPEED: 2.4,         // wrist speed (torso lengths / s) that can start a punch
+  NOISE_MULT: 3.5,    // ...and at least this many times the fighter's usual hand movement
   PEAK_WIN: 0.12,     // s either side a peak must beat
   REFRACTORY: 0.22,   // s between punches from the same hand
   MIN_REACH: 0.5,     // fist must get at least this far from its shoulder (torso lengths); hooks look short side-on
+  MIN_TRAVEL: 0.45,   // fist must travel at least this far during the punch (torso lengths)
+  MIN_APPROACH: 0.25, // ...and end at least this much closer to the opponent than it started
   EXCHANGE_GAP: 1.2,  // s of quiet that ends an exchange
   RUN_GAP: 0.8,       // s between punches that still counts as one combination
   COUNTER_WIN: 0.6,   // s after an opponent's punch that counts as a counter
   MOVE: 0.35,         // torso lengths of travel that counts as stepping in / out
+  DOWN_MIN: 0.5,      // s on the canvas that counts as a knockdown
+  COUNT_PAUSE: 4,     // s after a knockdown when punches aren't counted (the count)
 };
 
-// ---------------------------------------------------------------- pose helpers
-export const pt = (p, mi) => { const s = SLOT[mi] * 3; return [p[s], p[s + 1], p[s + 2]]; };
-export const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-const d2 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
-export function center(p) { const s = mid(pt(p, 11), pt(p, 12)), h = mid(pt(p, 23), pt(p, 24)); return mid(s, h); }
-export function torso(p) { return Math.max(1, d2(mid(pt(p, 11), pt(p, 12)), mid(pt(p, 23), pt(p, 24)))); }
-export { BONES, COLORS };
-function elbowAngle(p, side) {
-  const [s, e, w] = side === 'left' ? [11, 13, 15] : [12, 14, 16];
-  const S = pt(p, s), E = pt(p, e), W = pt(p, w);
-  const a = [S[0] - E[0], S[1] - E[1]], b = [W[0] - E[0], W[1] - E[1]];
-  const c = (a[0] * b[0] + a[1] * b[1]) / ((Math.hypot(...a) * Math.hypot(...b)) || 1);
-  return Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI;
-}
-
-export function packPose(lm, w, h) {
-  const p = new Float32Array(KEEP.length * 3);
-  KEEP.forEach((mi, i) => { p[i * 3] = lm[mi].x * w; p[i * 3 + 1] = lm[mi].y * h; p[i * 3 + 2] = lm[mi].visibility ?? 1; });
-  return p;
-}
-
-// ---------------------------------------------------------------- tracking
-// Keeps two fighter identities across frames. Fighter 0 starts on the left.
-// A third person (usually the referee) is ignored: the fighters are the pair that face
-// each other and stand close; a referee tends to face the camera or stand off to one side.
-export class Tracker {
-  constructor(width) { this.pos = [null, null]; this.gate = width * 0.22; this.width = width; }
-  update(dets) {
-    const cs = dets.map(center);
-    if (!this.pos[0]) {
-      if (dets.length < 2) return [null, null];
-      // how much a person faces direction dir (+1 = right): nose ahead of the body
-      const facing = (k, dir) => Math.max(0, Math.min(1, ((pt(dets[k], 0)[0] - cs[k][0]) * dir) / (torso(dets[k]) * 0.3)));
-      let best = null;
-      for (let i = 0; i < dets.length; i++) for (let j = i + 1; j < dets.length; j++) {
-        const [l, r] = cs[i][0] <= cs[j][0] ? [i, j] : [j, i];
-        const cost = d2(cs[l], cs[r]) / this.width - 0.5 * (facing(l, 1) + facing(r, -1));
-        if (!best || cost < best.cost) best = { cost, l, r };
-      }
-      this.pos = [cs[best.l], cs[best.r]];
-      return [dets[best.l], dets[best.r]];
-    }
-    let best = { cost: Infinity, a: -1, b: -1 };
-    for (let a = -1; a < dets.length; a++) for (let b = -1; b < dets.length; b++) {
-      if (a >= 0 && a === b) continue;
-      const ca = a < 0 ? this.gate : d2(cs[a], this.pos[0]);
-      const cb = b < 0 ? this.gate : d2(cs[b], this.pos[1]);
-      if (ca > this.gate * 1.0001 || cb > this.gate * 1.0001) continue;
-      if (ca + cb < best.cost) best = { cost: ca + cb, a, b };
-    }
-    if (best.a >= 0) this.pos[0] = cs[best.a];
-    if (best.b >= 0) this.pos[1] = cs[best.b];
-    return [best.a >= 0 ? dets[best.a] : null, best.b >= 0 ? dets[best.b] : null];
-  }
-}
-
 // ---------------------------------------------------------------- analysis
-// frames: [{ t, poses: [pose|null, pose|null] }]  (pose = packPose output)
+// frames: [{ t, poses: [poseA|null, poseB|null], ref: pose|null, cut: bool }]  (pose = packPose output)
 export function analyse(frames) {
   const series = [0, 1].map((k) => frames.filter((f) => f.poses[k]).map((f) => ({ t: f.t, p: f.poses[k] })));
+  const refSeries = frames.filter((f) => f.ref).map((f) => ({ t: f.t, p: f.ref }));
   const nearest = (k, t) => {
     const s = series[k];
     if (!s.length) return null;
@@ -110,13 +59,85 @@ export function analyse(frames) {
     return ((b - a) * dirAt(k, t0)) / torsoAvg[k];
   };
 
-  const punches = [];
+  const knockdowns = findKnockdowns();
+  const refIn = findRefIn();
+  // no punches are counted while a fighter is down and being counted, or while the referee is between them
+  const quiet = [...knockdowns.map((kd) => [kd.t, kd.tEnd + A.COUNT_PAUSE]), ...refIn.map((r) => [r.t, r.tEnd])];
+  let punches = [];
   for (const k of [0, 1]) punches.push(...detect(k));
+  punches = punches.filter((p) => !quiet.some(([a, b]) => p.t >= a && p.t <= b));
   punches.sort((a, b) => a.t - b.t);
   const exchanges = group(punches);
   for (const ex of exchanges) describe(ex);
+
+  for (const kd of knockdowns) {
+    kd.cause = [...punches].reverse().find((p) => p.f === 1 - kd.f && p.t <= kd.t + 0.1 && kd.t - p.t <= 2.5) || null;
+    kd.ex = exchanges.find((e) => kd.t >= e.start - 0.2 && kd.t <= e.end + 2.5) || null;
+    if (kd.ex) {
+      // falling over isn't "giving ground"
+      kd.ex.notes = kd.ex.notes.filter((n) => !(n.k === 'end' && n.text.startsWith(`{${kd.f}}`)));
+      kd.ex.notes.push({ k: 'knockdown', text: `{${kd.f}} goes down${kd.cause ? ` from ${pName(kd.cause)}` : ''}. Knockdown!` });
+      kd.ex.knockdown = kd;
+    }
+  }
+  for (const r of refIn) {
+    const ex = exchanges.find((e) => r.t >= e.start && r.t <= e.end + 2.5);
+    if (ex && !ex.refNote) {
+      ex.refNote = true;
+      ex.notes.push({ k: 'ref', text: ex.knockdown ? 'The referee steps in and starts the count' : 'The referee steps in to separate them' });
+    }
+  }
+
   const duration = frames.length ? frames[frames.length - 1].t - frames[0].t : 0;
-  return { punches, exchanges, duration, stats: [0, 1].map((k) => fighterStats(k, punches, exchanges, duration)), coverage: series.map((s) => s.length / Math.max(1, frames.length)) };
+  return {
+    punches, exchanges, duration, knockdowns, refIn,
+    stats: [0, 1].map((k) => fighterStats(k, punches, exchanges, duration, knockdowns)),
+    coverage: series.map((s) => s.length / Math.max(1, frames.length)),
+    refCoverage: refSeries.length / Math.max(1, frames.length),
+  };
+
+  function findKnockdowns() {
+    const out = [];
+    for (const k of [0, 1]) {
+      const s = series[k];
+      if (s.length < 5) continue;
+      const flags = s.map((f) => ({ t: f.t, d: isDown(f.p, torsoAvg[k]) }));
+      const segs = [];
+      let seg = null;
+      for (const x of flags) {
+        if (!x.d) continue;
+        if (seg && x.t - seg.end <= 0.3) seg.end = x.t;
+        else { if (seg) segs.push(seg); seg = { start: x.t, end: x.t }; }
+      }
+      if (seg) segs.push(seg);
+      for (const g of segs) {
+        if (g.end - g.start < A.DOWN_MIN) continue;
+        // must have been on their feet just before, so a clip starting mid-count isn't a new knockdown
+        if (!flags.some((x) => !x.d && x.t < g.start && x.t >= g.start - 2)) continue;
+        out.push({ f: k, t: g.start, tEnd: g.end });
+      }
+    }
+    return out.sort((a, b) => a.t - b.t);
+  }
+
+  // The referee standing between the fighters, close to them: stepping in to break or to stop it.
+  function findRefIn() {
+    const segs = [];
+    let seg = null;
+    for (const r of refSeries) {
+      const a = nearest(0, r.t), b = nearest(1, r.t);
+      if (!a || !b) continue;
+      const ca = center(a.p), cb = center(b.p), cr = center(r.p);
+      const L = (torso(a.p) + torso(b.p)) / 2;
+      const between = cr[0] > Math.min(ca[0], cb[0]) + 0.2 * L && cr[0] < Math.max(ca[0], cb[0]) - 0.2 * L;
+      const close = Math.min(d2(cr, ca), d2(cr, cb)) < 1.6 * L;
+      if (!(between && close)) continue;
+      if (seg && r.t - seg.tEnd <= 0.3) seg.tEnd = r.t;
+      else { if (seg) segs.push(seg); seg = { t: r.t, tEnd: r.t }; }
+    }
+    if (seg) segs.push(seg);
+    return segs.filter((g) => g.tEnd - g.t >= 0.3);
+  }
 
   function detect(k) {
     const s = series[k];
@@ -146,10 +167,15 @@ export function analyse(frames) {
         return Math.hypot(r.r[sd].rel[0] - q.r[sd].rel[0], r.r[sd].rel[1] - q.r[sd].rel[1]) / dt;
       });
       const sv = v.map((x, i) => (v[i - 1] ?? x) / 3 + x / 3 + (v[i + 1] ?? x) / 3);
+      // this fighter's usual hand movement (guard adjustments, bouncing): a punch must stand well clear of it
+      const moving = sv.filter((x) => x > 0.05).sort((a, b) => a - b);
+      const noise = moving.length ? moving[moving.length >> 1] : 0;
+      const th = Math.max(A.SPEED, A.NOISE_MULT * noise);
+      const wMi = wristMi[sd];
       let lastT = -Infinity;
       for (let i = 1; i < rows.length - 1; i++) {
         const t = rows[i].t;
-        if (sv[i] < A.SPEED || rows[i].r[sd].vis < 0.3 || t - lastT < A.REFRACTORY) continue;
+        if (sv[i] < th || rows[i].r[sd].vis < 0.5 || t - lastT < A.REFRACTORY) continue;
         let isPeak = true;
         for (let j = i - 1; j >= 0 && t - rows[j].t <= A.PEAK_WIN; j--) if (sv[j] > sv[i]) { isPeak = false; break; }
         for (let j = i + 1; isPeak && j < rows.length && rows[j].t - t <= A.PEAK_WIN; j++) if (sv[j] >= sv[i]) isPeak = false;
@@ -158,9 +184,19 @@ export function analyse(frames) {
         // furthest point of the punch
         let far = rows[i];
         for (const r of rows) if (r.t >= t - 0.05 && r.t <= t + 0.2 && r.r[sd].reach > far.r[sd].reach) far = r;
-        if (far.r[sd].reach < A.MIN_REACH) continue;
+        if (far.r[sd].reach < A.MIN_REACH || far.r[sd].vis < 0.5) continue;
+        const start = at(t - 0.15);
+        // a real punch travels a fair way...
+        const travel = Math.hypot(far.r[sd].rel[0] - start.r[sd].rel[0], far.r[sd].rel[1] - start.r[sd].rel[1]);
+        if (travel < A.MIN_TRAVEL) continue;
+        // ...towards an opponent who is actually there (gestures, guard shuffles and the referee's arms don't)
+        const opp0 = nearest(1 - k, start.t), opp1 = nearest(1 - k, far.t);
+        if (!opp0 || !opp1) continue;
+        const aim = (op) => { const hd = pt(op.p, 0); return hd[2] > 0.3 ? hd : center(op.p); };
+        const approach = (d2(pt(start.p, wMi), aim(opp0)) - d2(pt(far.p, wMi), aim(opp1))) / torso(far.p);
+        if (approach < A.MIN_APPROACH) continue;
         lastT = t;
-        out.push(classify(k, sd, t, at(t - 0.15), far));
+        out.push(classify(k, sd, t, start, far));
       }
     }
     return out;
@@ -288,8 +324,9 @@ function pName(p, bare = false) {
   return bare ? n + tgt : `${/^[aeiou]/.test(n) ? 'an' : 'a'} ${n}${tgt}`;
 }
 
-function fighterStats(k, punches, exchanges, duration) {
+function fighterStats(k, punches, exchanges, duration, knockdowns = []) {
   const mine = punches.filter((p) => p.f === k);
+  const scored = knockdowns.filter((kd) => kd.f !== k).length, suffered = knockdowns.filter((kd) => kd.f === k).length;
   const by = {};
   for (const p of mine) by[p.label] = (by[p.label] || 0) + 1;
   const body = mine.filter((p) => p.target === 'body').length;
@@ -310,7 +347,7 @@ function fighterStats(k, punches, exchanges, duration) {
   }
   const topPair = Object.entries(pairs).sort((a, b) => b[1] - a[1])[0] || null;
   return {
-    total: mine.length, by, led, counters,
+    total: mine.length, by, led, counters, scored, suffered,
     bodyPct: tgt ? body / tgt : null,
     perMin: duration >= 10 ? mine.length / (duration / 60) : null,
     topPair: topPair && topPair[1] >= 2 ? { seq: topPair[0].split('>'), n: topPair[1] } : null,
@@ -321,8 +358,11 @@ function fighterStats(k, punches, exchanges, duration) {
 export function insights(res, names) {
   const [a, b] = res.stats;
   const out = [];
+  for (const kd of res.knockdowns || []) {
+    out.push(`${names[1 - kd.f]} dropped ${names[kd.f]}${kd.cause ? ` with ${pName(kd.cause)}` : ''} at ${fmt(kd.t)}.`);
+  }
   const n = res.exchanges.length;
-  if (!n) return ['No exchanges found. Try a clip where both fighters stay fully in frame, side-on to the camera.'];
+  if (!n) return out.length ? out : ['No exchanges found. Try a clip where both fighters stay fully in frame, side-on to the camera.'];
   for (const k of [0, 1]) {
     const s = res.stats[k], nm = names[k];
     if (s.led >= Math.max(2, n * 0.6)) out.push(`${nm} led ${s.led} of ${n} exchanges: the one applying pressure.`);
@@ -361,8 +401,8 @@ export function initBreakdown({ root }) {
       <p class="lede">Upload a clip of two fighters. It tracks both, calls every punch, and breaks down who led, the setups and the counters.</p>
     </header>
     <div class="card" data-k="setup">
-      <div class="row"><span class="row-label">Left fighter</span><input class="name-in" data-k="n0" value="Left fighter" maxlength="24" aria-label="Left fighter name"></div>
-      <div class="row"><span class="row-label">Right fighter</span><input class="name-in" data-k="n1" value="Right fighter" maxlength="24" aria-label="Right fighter name"></div>
+      <div class="row"><span class="row-label"><i class="dot f0"></i>Fighter A</span><input class="name-in" data-k="n0" value="Fighter A" maxlength="24" aria-label="Fighter A name"></div>
+      <div class="row"><span class="row-label"><i class="dot f1"></i>Fighter B</span><input class="name-in" data-k="n1" value="Fighter B" maxlength="24" aria-label="Fighter B name"></div>
       <div class="row"><span class="row-label" id="lbl-quality">Detail</span>
         <div class="seg" role="radiogroup" aria-labelledby="lbl-quality" data-k="quality">
           <button type="button" role="radio" data-value="0.5" aria-checked="true">High (½ speed)</button>
@@ -375,6 +415,13 @@ export function initBreakdown({ root }) {
     <p class="status" data-k="status" role="status"></p>
     <div class="card bd-player" data-k="player" hidden>
       <div class="bd-stage"><video data-k="video" playsinline muted></video><canvas data-k="overlay"></canvas><canvas data-k="film" class="film-canvas" hidden></canvas></div>
+      <div class="bd-who" data-k="who" hidden>
+        <p class="bd-who-title">Who's who?</p>
+        <p class="sheet-note">Tap a box to change it: Fighter A → Fighter B → Referee → Ignore. It keeps track of them from here,
+        even when they swap sides.</p>
+        <div class="row-btns"><button type="button" class="mini primary-mini" data-k="whook">Looks right, analyse</button>
+          <button type="button" class="mini" data-k="whonext">Try a later frame</button></div>
+      </div>
       <div class="bd-progress" data-k="progress"><div class="bar"><i data-k="pbar"></i></div><span data-k="ptext">Reading the clip…</span><button type="button" class="mini" data-k="stop">Stop here</button></div>
       <div class="bd-timeline" data-k="timeline" hidden></div>
       <div class="bd-legend" data-k="legend" hidden></div>
@@ -384,7 +431,8 @@ export function initBreakdown({ root }) {
   const $ = (k) => root.querySelector(`[data-k="${k}"]`);
   const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
   let rate = 0.5, frames = [], result = null, processing = false, url = null, watchEnd = null, raf = 0;
-  const names = () => [$('n0').value.trim() || 'Left fighter', $('n1').value.trim() || 'Right fighter'];
+  const names = () => [$('n0').value.trim() || 'Fighter A', $('n1').value.trim() || 'Fighter B'];
+  let setup = null;   // { dets, roles, boxes } while choosing who's who
 
   $('quality').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
@@ -407,11 +455,23 @@ export function initBreakdown({ root }) {
     if (url) URL.revokeObjectURL(url);
     url = URL.createObjectURL(file);
     video.src = url; video.controls = false; video.muted = true;
-    try { await new Promise((ok, bad) => { video.onloadedmetadata = ok; video.onerror = bad; }); }
+    try { await new Promise((ok, bad) => { video.onloadeddata = ok; video.onerror = bad; }); }
     catch { fail('That video could not be opened on this device.'); return; }
-    frames = []; result = null; processing = true;
+    frames = []; result = null;
     const tracker = new Tracker(video.videoWidth);
+    const sampler = new Sampler();
     const w = video.videoWidth, h = video.videoHeight;
+
+    // 1. who's who: find a frame with at least two people, show the guess, let the user fix it
+    $('ptext').textContent = 'Finding the fighters and the referee…';
+    const confirmed = await chooseWho(lmk, sampler, w, h);
+    if (!confirmed) return;
+    tracker.init(confirmed.dets, confirmed.apps, confirmed.roles);
+
+    // 2. track the whole clip
+    $('progress').hidden = false;
+    await seekTo(0);
+    processing = true;
     let lastT = -1;
     const onFrame = (_now, meta) => {
       if (!processing) return;
@@ -421,19 +481,162 @@ export function initBreakdown({ root }) {
         try {
           const r = lmk.detectForVideo(video, performance.now());
           const dets = (r.landmarks || []).map((lm) => packPose(lm, w, h));
-          frames.push({ t, poses: tracker.update(dets) });
+          const cut = sampler.grab(video);
+          const apps = dets.map((p) => sampler.appearance(p));
+          const [a, b, ref] = tracker.update(dets, apps, cut, t);
+          frames.push({ t, poses: [a, b], ref, cut });
         } catch (e) { console.error(e); }
         $('pbar').style.width = `${Math.min(100, (t / (video.duration || 1)) * 100)}%`;
-        $('ptext').textContent = `Tracking both fighters… ${fmt(t)} / ${fmt(video.duration)}`;
+        $('ptext').textContent = `Tracking the fighters and referee… ${fmt(t)} / ${fmt(video.duration)}`;
         drawAt(t);
       }
       next();
     };
     const next = () => { if (!processing) return; if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onFrame); else requestAnimationFrame(() => onFrame(0, null)); };
     video.onended = () => finish();
+    // phones stop sending video frames to a page in the background: pause until it's back
+    const onVis = () => {
+      if (!processing) { document.removeEventListener('visibilitychange', onVis); return; }
+      if (document.hidden) { video.pause(); $('ptext').textContent = 'Paused while the app is in the background…'; }
+      else { video.play().catch(() => {}); next(); }
+    };
+    document.addEventListener('visibilitychange', onVis);
     video.playbackRate = rate;
     try { await video.play(); } catch (e) { console.error(e); fail('That video could not be played on this device.'); return; }
     next();
+  }
+
+  function seekTo(t) {
+    return new Promise((ok) => {
+      if (Math.abs(video.currentTime - t) < 0.01 && video.readyState >= 2) { ok(); return; }
+      video.addEventListener('seeked', ok, { once: true });
+      video.currentTime = t;
+      setTimeout(ok, 2500);
+    });
+  }
+
+  async function detectAt(lmk, sampler, w, h, t) {
+    await seekTo(t);
+    const r = lmk.detectForVideo(video, performance.now());
+    const dets = (r.landmarks || []).map((lm) => packPose(lm, w, h));
+    sampler.grab(video);
+    return { dets, apps: dets.map((p) => sampler.appearance(p)), t };
+  }
+
+  // Shows a frame with everyone boxed and the app's guess; resolves once the user confirms.
+  async function chooseWho(lmk, sampler, w, h) {
+    const dur = video.duration || 0;
+    const scan = async (from) => {
+      for (let tt = from; tt < Math.min(dur, from + 15); tt += 0.75) {
+        const d = await detectAt(lmk, sampler, w, h, tt);
+        if (d.dets.length >= 2) return d;
+      }
+      return null;
+    };
+    let found = await scan(Math.min(0.4, dur / 4));
+    if (!found) {
+      // fall back to any frame with at least one person
+      for (let tt = 0.4; tt < Math.min(dur, 10) && !found; tt += 1) { const d = await detectAt(lmk, sampler, w, h, tt); if (d.dets.length) found = d; }
+    }
+    if (!found) { fail('Couldn\'t find anyone in the first part of this clip. Try a clip where the fighters are in shot.'); return null; }
+    $('progress').hidden = true;
+    return new Promise((resolve) => {
+      const show = (f) => {
+        setup = { ...f, roles: Tracker.guess(f.dets, f.apps) };
+        $('who').hidden = false;
+        overlay.classList.add('picking');
+        drawSetup();
+      };
+      show(found);
+      $('whook').onclick = () => {
+        // one fighter is enough: the other is picked up as soon as they come into shot
+        if (!setup.roles.includes('A') && !setup.roles.includes('B')) {
+          $('status').textContent = 'Mark at least one fighter first.'; $('status').classList.add('error');
+          return;
+        }
+        $('status').textContent = ''; $('status').classList.remove('error');
+        const s = setup; setup = null;
+        $('who').hidden = true; overlay.classList.remove('picking');
+        resolve(s);
+      };
+      $('whonext').onclick = async () => {
+        $('whonext').disabled = true;
+        const f = await scan(setup.t + 1.5);
+        $('whonext').disabled = false;
+        if (f) show(f); else $('status').textContent = 'No later frame with two people in shot.';
+      };
+    });
+  }
+
+  // maps between video pixels and the overlay
+  function fit() {
+    const cw = overlay.clientWidth, ch = overlay.clientHeight;
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const sc = Math.min(cw / vw, ch / vh);
+    return { cw, ch, sc, ox: (cw - vw * sc) / 2, oy: (ch - vh * sc) / 2 };
+  }
+  function prepCanvas() {
+    const { cw, ch } = fit(), dpr = window.devicePixelRatio || 1;
+    if (overlay.width !== Math.round(cw * dpr) || overlay.height !== Math.round(ch * dpr)) { overlay.width = Math.round(cw * dpr); overlay.height = Math.round(ch * dpr); }
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, cw, ch);
+  }
+  const ROLE_LABEL = { A: () => names()[0], B: () => names()[1], R: () => 'Referee' };
+  const ROLE_COLOR = { A: COLORS[0], B: COLORS[1], R: REF_COLOR };
+
+  function drawSetup() {
+    if (!setup) return;
+    prepCanvas();
+    const { sc, ox, oy } = fit();
+    setup.dets.forEach((p, i) => {
+      const b = box(p); if (!b) return;
+      const role = setup.roles[i];
+      const col = role ? ROLE_COLOR[role] : 'rgba(255,255,255,0.45)';
+      const x = ox + b.x0 * sc, y = oy + b.y0 * sc, bw = (b.x1 - b.x0) * sc, bh = (b.y1 - b.y0) * sc;
+      octx.lineWidth = 3; octx.strokeStyle = col; octx.setLineDash(role ? [] : [6, 5]);
+      octx.beginPath(); octx.roundRect(x, y, bw, bh, 10); octx.stroke(); octx.setLineDash([]);
+      drawSkeleton(p, col, sc, ox, oy, 0.8);
+      tag(role ? ROLE_LABEL[role]() : 'Ignore', x + bw / 2, Math.max(14, y - 4), col, true);
+    });
+  }
+
+  overlay.addEventListener('click', (e) => {
+    if (!setup) return;
+    const r = overlay.getBoundingClientRect();
+    const { sc, ox, oy } = fit();
+    const vx = (e.clientX - r.left - ox) / sc, vy = (e.clientY - r.top - oy) / sc;
+    const hits = setup.dets.map((p, i) => ({ i, b: box(p) })).filter(({ b }) => b && vx >= b.x0 && vx <= b.x1 && vy >= b.y0 && vy <= b.y1)
+      .sort((a, b) => (a.b.x1 - a.b.x0) * (a.b.y1 - a.b.y0) - (b.b.x1 - b.b.x0) * (b.b.y1 - b.b.y0));
+    if (!hits.length) return;
+    const i = hits[0].i;
+    const order = ['A', 'B', 'R', null];
+    const next = order[(order.indexOf(setup.roles[i]) + 1) % order.length];
+    if (next) setup.roles = setup.roles.map((x) => (x === next ? null : x));   // each role belongs to one person
+    setup.roles[i] = next;
+    drawSetup();
+  });
+
+  function drawSkeleton(p, col, sc, ox, oy, alpha = 1) {
+    const P = (mi) => { const q = pt(p, mi); return [ox + q[0] * sc, oy + q[1] * sc, q[2]]; };
+    octx.save();
+    octx.globalAlpha = alpha; octx.lineCap = 'round'; octx.lineWidth = 2.5; octx.strokeStyle = col; octx.shadowColor = col; octx.shadowBlur = 8;
+    for (const [a, b] of BONES) {
+      const A1 = P(a), B1 = P(b);
+      if (A1[2] < 0.3 || B1[2] < 0.3) continue;
+      octx.beginPath(); octx.moveTo(A1[0], A1[1]); octx.lineTo(B1[0], B1[1]); octx.stroke();
+    }
+    octx.restore();
+  }
+
+  function tag(text, x, y, col, bold = false) {
+    const { cw } = fit();
+    octx.save();
+    octx.font = `${bold ? 700 : 600} 13px system-ui, sans-serif`;
+    const tw = octx.measureText(text).width + 14;
+    const left = Math.max(4, Math.min(cw - tw - 4, x - tw / 2)), top = Math.max(4, y - 20);
+    octx.fillStyle = 'rgba(5,6,7,0.82)'; octx.beginPath(); octx.roundRect(left, top, tw, 20, 10); octx.fill();
+    octx.strokeStyle = col; octx.lineWidth = 1; octx.stroke();
+    octx.fillStyle = col; octx.fillText(text, left + 7, top + 14);
+    octx.restore();
   }
 
   function finish() {
@@ -465,44 +668,35 @@ export function initBreakdown({ root }) {
     raf = requestAnimationFrame(loop);
   }
 
-  // Skeletons for both fighters plus a label on each punch as it happens.
+  // Skeletons for both fighters (and the referee, in grey), names, punches and knockdowns.
   function drawAt(t) {
-    const cw = overlay.clientWidth, ch = overlay.clientHeight, dpr = window.devicePixelRatio || 1;
-    if (!cw || !ch) return;
-    if (overlay.width !== Math.round(cw * dpr) || overlay.height !== Math.round(ch * dpr)) { overlay.width = Math.round(cw * dpr); overlay.height = Math.round(ch * dpr); }
-    octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, cw, ch);
-    const vw = video.videoWidth, vh = video.videoHeight;
-    if (!vw || !frames.length) return;
-    const sc = Math.min(cw / vw, ch / vh), ox = (cw - vw * sc) / 2, oy = (ch - vh * sc) / 2;
+    if (setup) return drawSetup();
+    if (!overlay.clientWidth || !video.videoWidth) return;
+    prepCanvas();
+    if (!frames.length) return;
+    const { sc, ox, oy } = fit();
     let lo = 0, hi = frames.length - 1;
     while (lo < hi) { const m = (lo + hi) >> 1; if (frames[m].t < t) lo = m + 1; else hi = m; }
     const fr = frames[lo];
     if (!fr || Math.abs(fr.t - t) > 0.3) return;
-    octx.lineCap = 'round'; octx.lineWidth = 2.5; octx.shadowBlur = 8;
+    const head = (p) => { const q = pt(p, 0); return [ox + q[0] * sc, oy + q[1] * sc]; };
+    if (fr.ref) {
+      drawSkeleton(fr.ref, REF_COLOR, sc, ox, oy, 0.6);
+      const h = head(fr.ref); tag('REF', h[0], h[1] - 26, REF_COLOR);
+    }
+    const nm = names();
     fr.poses.forEach((p, k) => {
       if (!p) return;
-      const P = (mi) => { const q = pt(p, mi); return [ox + q[0] * sc, oy + q[1] * sc, q[2]]; };
-      octx.strokeStyle = COLORS[k]; octx.shadowColor = COLORS[k];
-      for (const [a, b] of BONES) {
-        const A1 = P(a), B1 = P(b);
-        if (A1[2] < 0.3 || B1[2] < 0.3) continue;
-        octx.beginPath(); octx.moveTo(A1[0], A1[1]); octx.lineTo(B1[0], B1[1]); octx.stroke();
-      }
+      drawSkeleton(p, COLORS[k], sc, ox, oy);
+      const h = head(p);
+      const labels = [];
       if (result) {
-        const live = result.punches.filter((q) => q.f === k && t >= q.t - 0.1 && t <= q.t + 0.5);
-        live.forEach((q, i) => {
-          const H = P(0);
-          const txt = NAMES[q.label] + (q.target === 'body' ? ' (body)' : '');
-          octx.shadowBlur = 0; octx.font = '600 13px system-ui, sans-serif';
-          const tw = octx.measureText(txt).width + 14;
-          const x = Math.max(4, Math.min(cw - tw - 4, H[0] - tw / 2)), y = Math.max(4, H[1] - 44 - i * 24);
-          octx.fillStyle = 'rgba(5,6,7,0.8)'; octx.beginPath(); octx.roundRect(x, y, tw, 20, 10); octx.fill();
-          octx.fillStyle = COLORS[k]; octx.fillText(txt, x + 7, y + 14);
-          octx.shadowBlur = 8;
-        });
+        if (result.knockdowns.some((kd) => kd.f === k && t >= kd.t && t <= kd.tEnd + 1.5)) labels.push(['KNOCKDOWN', '#ff6b6b']);
+        for (const q of result.punches) if (q.f === k && t >= q.t - 0.1 && t <= q.t + 0.5) labels.push([NAMES[q.label] + (q.target === 'body' ? ' (body)' : ''), COLORS[k]]);
       }
+      if (!labels.length) labels.push([nm[k], COLORS[k]]);
+      labels.forEach(([txt, col], i) => tag(txt, h[0], h[1] - 26 - i * 24, col, i === 0));
     });
-    octx.shadowBlur = 0;
   }
 
   let director = null;
@@ -591,6 +785,12 @@ export function initBreakdown({ root }) {
       const d = document.createElement('i'); d.className = `bd-dot f${p.f}`; d.style.left = `${(p.t / dur) * 100}%`;
       tl.append(d);
     }
+    for (const kd of res.knockdowns) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'bd-kd';
+      b.style.left = `${(kd.t / dur) * 100}%`; b.title = `Knockdown: ${nm[kd.f]} down`; b.setAttribute('aria-label', `Watch the knockdown at ${fmt(kd.t)}`);
+      b.addEventListener('click', () => watch({ start: kd.t - 1.5, end: kd.tEnd }));
+      tl.append(b);
+    }
     const lg = $('legend'); lg.hidden = false; lg.replaceChildren();
     nm.forEach((n, k) => { const s = document.createElement('span'); s.className = `f${k}`; s.textContent = n; lg.append(s); });
 
@@ -621,7 +821,8 @@ export function initBreakdown({ root }) {
     const grid = document.createElement('div'); grid.className = 'bd-fighters';
     res.stats.forEach((s, k) => {
       const c = document.createElement('div'); c.className = 'card bd-fighter';
-      const h = document.createElement('p'); h.className = `card-title f${k}`; h.textContent = nm[k];
+      const h = document.createElement('p'); h.className = `card-title f${k}`;
+      h.textContent = nm[k] + (s.scored ? ` · ${s.scored} knockdown${s.scored > 1 ? 's' : ''}` : '') + (s.suffered ? ` · down ${s.suffered}×` : '');
       const st = document.createElement('div'); st.className = 'bd-stats';
       for (const [v, l] of [[s.total, 'Punches'], [s.led, 'Led'], [s.counters, 'Counters'], [s.bodyPct == null ? '–' : `${Math.round(s.bodyPct * 100)}%`, 'Body']]) {
         const d = document.createElement('div'); d.className = 'stat';
@@ -680,6 +881,12 @@ export function initBreakdown({ root }) {
 
   return {
     hide() { if (!processing) { video.pause(); } director?.stop(); },
+    get _frames() { return frames; },
+    // Developer readout: how often each person was seen.
+    get _stats() {
+      const n = frames.length || 1;
+      return { frames: frames.length, A: frames.filter((f) => f.poses[0]).length / n, B: frames.filter((f) => f.poses[1]).length / n, ref: frames.filter((f) => f.ref).length / n, cuts: frames.filter((f) => f.cut).length, punches: result?.punches.length, knockdowns: result?.knockdowns.length };
+    },
     // Developer test hook: load a video URL with ready-made frames (skips pose tracking).
     async _testVideo(src, fs) {
       video.src = src; video.controls = true; video.muted = true;

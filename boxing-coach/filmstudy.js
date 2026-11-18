@@ -165,6 +165,16 @@ export function buildScript(res, frames, names, readLines = []) {
     }
   });
 
+  // knockdowns always get their own stop
+  for (const kd of res.knockdowns || []) {
+    const c = kd.cause;
+    beats.push({
+      t: Math.min(tEnd, kd.t + 0.4), kind: 'knockdown', label: 'Knockdown',
+      text: `Knockdown! ${N(kd.f)} goes down${c ? `, and it's the ${lowerName(c.label)}${c.target === 'body' ? ' to the body' : ''} from ${N(1 - kd.f)} that does it` : ''}.`,
+      marks: [{ type: 'spot', f: kd.f }, { type: 'tag', f: kd.f, text: 'KNOCKDOWN' }],
+    });
+  }
+
   const read = readLines.slice(0, 3).join(' ');
   beats.push({ t: tEnd, kind: 'outro', text: read ? `So, the takeaways. ${read}` : 'That\'s the breakdown.', marks: [{ type: 'tag', f: 0, text: N(0) }, { type: 'tag', f: 1, text: N(1) }] });
 

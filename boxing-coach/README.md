@@ -48,7 +48,13 @@ The app has four pages, switched with the tab bar at the bottom:
   them on the phone and shows a self-test score. Redo any punch or combo it gets wrong.
   Once each punch has 5+ examples, Analyse uses **your model**, which also uses which hand
   moved (lead or rear) and your taught combos to call fast punches, and says the combo name.
-- **Fights**: upload a clip of two fighters (e.g. a pro fight). It tracks both fighters,
+- **Fights**: upload a clip of two fighters (e.g. a pro fight). First it shows **who's who**:
+  everyone is boxed with its guess (Fighter A, Fighter B, Referee) and you tap to correct it.
+  The referee is recognised by his shirt and bare hands (fighters are shirtless with gloves), and
+  fighters are tracked by appearance (trunks, gloves, skin), so swapping sides or camera cuts don't
+  swap them. Small arm movements, guard adjustments and the referee's gestures don't count as
+  punches: a punch has to travel towards an opponent who is in shot. It also detects **knockdowns**
+  (and what caused them) and when the **referee steps in**. It tracks both fighters,
   calls each punch (type, lead/rear, head/body), splits the clip into exchanges and writes up
   who led, the setups (jab into the cross, double jab, body-to-head…), the counters and who had
   the last word, plus each fighter's output, punch mix and go-to combination. Tap an
@@ -95,6 +101,7 @@ Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips 
 | `personal.js` | Your model: stance, taught punches and combos, k-nearest-neighbour classifier, self-test |
 | `filmstudy.js` | AI film study: commentary script, paused highlights, voice-over, video export |
 | `voice.js`, `voice-worker.js` | Voice: Kokoro neural TTS in a worker (cached) + phone-voice fallback, settings panel |
+| `people.js` | Who's who: appearance sampling, referee detection, appearance-based tracking, knockdown check |
 | `breakdown.js` | Fight breakdown: two-fighter tracking, punch calls, exchanges and the write-up |
 | `lessons.js` | Lessons pages and the animated boxer (keyframed rig drawn on a canvas) |
 | `plexus.js` | Animated background |

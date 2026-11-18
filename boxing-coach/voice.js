@@ -381,7 +381,7 @@ export function buildVoicePanel({ phrases = [] } = {}) {
     voice.unlock();
     try {
       await voice.prepare(phrases, (d, n) => status(`Preparing coach calls ${d}/${n}…`));
-      status('Coach calls ready. They now play instantly in the natural voice.');
+      status(`Coach calls ready. They now play instantly in the ${voice.chatter ? `"${voice.cfg.cbVoice}"` : 'AI'} voice.`);
     } catch (e) { status(e.message, true); }
   });
 
