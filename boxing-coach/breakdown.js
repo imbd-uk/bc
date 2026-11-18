@@ -51,9 +51,20 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   };
   const xAt = (k, t) => { const f = nearest(k, t); return f ? center(f.p)[0] : null; };
   // +1 when the opponent is to the right
+  // Which side the opponent is on: a vote over the frames around t where both are seen, nearest counting
+  // most, so one mis-tracked frame (or the opponent being lost for a moment) doesn't flip it.
   const dirAt = (k, t) => {
-    const me = xAt(k, t), op = xAt(1 - k, t);
-    return me != null && op != null ? Math.sign(op - me) || 1 : (k === 0 ? 1 : -1);
+    for (const win of [0.6, 1.5, 4]) {
+      let v = 0;
+      for (const f of frames) {
+        if (f.t < t - win) continue;
+        if (f.t > t + win) break;
+        const a = f.poses[k], b = f.poses[1 - k];
+        if (a && b) v += Math.sign(center(b)[0] - center(a)[0]) / (0.1 + Math.abs(f.t - t));
+      }
+      if (v) return Math.sign(v);
+    }
+    return k === 0 ? 1 : -1;
   };
   const torsoAvg = [0, 1].map((k) => {
     const v = series[k].map((f) => torso(f.p)).sort((a, b) => a - b);
@@ -84,7 +95,6 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   // hardly ever changes. You can also set it, and it's remembered for that fighter's name.
   const stance = [0, 1].map((k) => {
     const set = overrides?.stance?.[k];
-    if (set) return { lead: set === 'southpaw' ? 'right' : 'left', set: true, conf: 1, local: [] };
     const local = [];
     for (const f of series[k]) {
       const op = nearest(1 - k, f.t, 0.3);
@@ -92,6 +102,7 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
       const s = stanceVote(f.p, op.p);
       if (s) local.push({ t: f.t, s });
     }
+    if (set) return { lead: set === 'southpaw' ? 'right' : 'left', set: true, conf: 1, local };
     const share = local.length ? local.filter((x) => x.s > 0).length / local.length : 0.5;
     return { lead: share >= 0.5 ? 'left' : 'right', set: false, conf: Math.abs(share - 0.5) * 2, local };
   });
@@ -121,9 +132,16 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   const quiet = [...knockdowns.map((kd) => [kd.t, kd.tEnd + A.COUNT_PAUSE]), ...refIn.map((r) => [r.t, r.tEnd])];
   const inQuiet = (t) => quiet.some(([a, b]) => t >= a && t <= b);
   let punches = [];
-  const feintCands = [];
+  const feintCands = [], allMisses = [];
   for (const k of [0, 1]) punches.push(...detect(k));
-  punches = punches.filter((p) => !inQuiet(p.t));
+  // near misses that look like punches you've taught it (from your tags and corrections) count too
+  if (model) {
+    for (const m of allMisses) {
+      if (inQuiet(m.t) || punches.some((p) => p.f === m.f && Math.abs(p.t - m.t) < A.REFRACTORY)) continue;
+      if (looksTaught(model, m)) { m.learnedDetect = true; punches.push(m); }
+    }
+  }
+  punches = punches.filter((p) => p.tagged || !inQuiet(p.t));
   // the pre-trained BoxingVI network decides the punch type (and can veto things that weren't punches)
   if (net) {
     punches = punches.filter((p) => {
@@ -140,7 +158,19 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     });
   }
   // what you've taught it from corrections overrides the built-in rules
-  if (model) punches = punches.filter((p) => applyModel(model, p));
+  // (a punch you called out stays a punch whatever the model thinks)
+  if (model) punches = punches.filter((p) => applyModel(model, p) || p.tagged);
+  for (const p of punches) settleRole(p);
+  // a knockdown has a cause: if no clear punch came before the fall, the opponent's best near miss just
+  // before it is the punch the camera couldn't quite see (a calculated guess, marked with ?)
+  for (const kd of knockdowns) {
+    if (punches.some((p) => p.f === 1 - kd.f && p.t <= kd.t + 0.1 && kd.t - p.t <= 2.5)) continue;
+    const score = (m) => m.speed * Math.max(0.05, m.approach);
+    const c = allMisses.filter((m) => m.f === 1 - kd.f && m.t >= kd.t - 1.5 && m.t <= kd.t + 0.1).sort((a, b) => score(b) - score(a))[0];
+    if (!c) continue;
+    c.inferred = true; c.outcome = 'landed'; settleRole(c);
+    punches.push(c);
+  }
   // punches it missed that you added by hand (the hand comes from the punch type and the stance)
   for (const m of overrides?.add || []) {
     if (punches.some((p) => p.f === m.f && Math.abs(p.t - m.t) < 0.25)) continue;
@@ -173,12 +203,28 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     c.reaction = !oppPunched && peak > Math.max(1.6, 2.5 * motionNoise[o]);
     c.followedBy = punches.find((p) => p.f === c.f && p.t > c.t + 0.1 && p.t - c.t <= 0.9) || null;
     return c;
-  }).filter((c) => c.reaction || c.followedBy).sort((a, b) => a.t - b.t);
-  const levels = [0, 1].flatMap(findLevelChanges).filter((l) => !inQuiet(l.t)).sort((a, b) => a.t - b.t);
+  }).filter((c) => c.tagged || c.reaction || c.followedBy).sort((a, b) => a.t - b.t);
+  const levels = [0, 1].flatMap(findLevelChanges).filter((l) => !inQuiet(l.t));
+  // level changes you called out
+  for (const tg of (overrides?.tags || []).filter((x) => x.kind === 'level')) {
+    const have = levels.find((l) => l.f === tg.f && Math.abs(l.t - tg.t) <= 0.8);
+    if (have) have.tagged = true; else levels.push({ f: tg.f, t: tg.t, depth: null, tagged: true });
+  }
+  levels.sort((a, b) => a.t - b.t);
   for (const l of levels) l.followedBy = punches.find((p) => p.f === l.f && p.t >= l.t - 0.1 && p.t - l.t <= 0.9) || null;
 
   const exchanges = group(punches);
   for (const ex of exchanges) describe(ex);
+  // an exchange you marked where even the closer look found no clear punches still gets an entry
+  for (const tg of (overrides?.tags || []).filter((x) => x.kind === 'exchange')) {
+    if (exchanges.some((e) => e.start <= tg.t + 1.5 && e.end >= tg.t - 1.5)) continue;
+    exchanges.push({
+      start: Math.max(0, tg.t - 1), end: tg.t + 1, punches: [], runs: [], init: null, count: [0, 0], marked: true,
+      notes: [{ k: 'lead', text: 'You marked an exchange here, but the punches were too hidden to read. Add them under "Missed something?"' }],
+    });
+  }
+  exchanges.sort((a, b) => a.start - b.start);
+  exchanges.forEach((ex, i) => { ex.n = i + 1; });
 
   for (const kd of knockdowns) {
     kd.cause = [...punches].reverse().find((p) => p.f === 1 - kd.f && p.t <= kd.t + 0.1 && kd.t - p.t <= 2.5) || null;
@@ -247,6 +293,7 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   const duration = frames.length ? frames[frames.length - 1].t - frames[0].t : 0;
   return {
     punches, exchanges, duration, knockdowns, refIn, feints, levels,
+    misses: allMisses,
     stance: stance.map((s) => ({ lead: s.lead, set: s.set, conf: s.conf, name: s.lead === 'left' ? 'orthodox' : 'southpaw' })),
     stats: [0, 1].map((k) => ({
       ...fighterStats(k, punches, exchanges, duration, knockdowns),
@@ -350,6 +397,32 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
       return { t: f.t, p: f.p, r };
     });
     const at = (t) => { let best = rows[0]; for (const r of rows) if (Math.abs(r.t - t) < Math.abs(best.t - t)) best = r; return best; };
+    const svs = {};
+    // what the hand did around row i: how far it went, towards whom
+    const candidate = (i, sd) => {
+      const t = rows[i].t, wMi = wristMi[sd];
+      let far = rows[i];
+      for (const r of rows) if (r.t >= t - 0.05 && r.t <= t + 0.2 && r.r[sd].reach > far.r[sd].reach) far = r;
+      const start = at(t - 0.15);
+      const travel = Math.hypot(far.r[sd].rel[0] - start.r[sd].rel[0], far.r[sd].rel[1] - start.r[sd].rel[1]);
+      // the pose model can lose the opponent for a few frames as a big shot lands, so allow half a second
+      const opp0 = nearest(1 - k, start.t, 0.5), opp1 = nearest(1 - k, far.t, 0.5);
+      const o0 = opp0 || nearest(1 - k, start.t, 1), o1 = opp1 || nearest(1 - k, far.t, 1);
+      if (!o0 || !o1) return { far, start, travel, approach: 0, near: false, oppSeen: false, extending: false };
+      const aim = (op) => { const hd = pt(op.p, 0); return hd[2] > 0.3 ? hd : center(op.p); };
+      const approach = (d2(pt(start.p, wMi), aim(o0)) - d2(pt(far.p, wMi), aim(o1))) / torso(far.p);
+      const extending = at(t + 0.08).r[sd].reach - at(t - 0.08).r[sd].reach > 0.05;
+      return { far, start, travel, approach, near: !!(opp0 && opp1), oppSeen: true, extending };
+    };
+    const makePunch = (i, sd, c) => {
+      const t = rows[i].t;
+      const p = classify(k, sd, t, c.start, c.far, Math.min(rows[i].r[sd].vis, c.far.r[sd].vis));
+      p.feat = punchFeature(at, t, dirAt(k, t), sd, c.far, p.role);
+      p.speed = svs[sd]?.[i] || 0;
+      p.approach = c.approach; p.travel = c.travel;
+      return p;
+    };
+    const misses = [];
     for (const sd of sides) {
       const v = rows.map((r, i) => {
         const q = rows[i - 1];
@@ -364,34 +437,25 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
       const noise = moving.length ? moving[moving.length >> 1] : 0;
       const th = Math.max(A.SPEED, A.NOISE_MULT * noise);
       const wMi = wristMi[sd];
+      svs[sd] = sv;
       let lastT = -Infinity;
       for (let i = 1; i < rows.length - 1; i++) {
         const t = rows[i].t;
-        if (sv[i] < th || rows[i].r[sd].vis < 0.5 || t - lastT < A.REFRACTORY) continue;
+        // anything fast enough to maybe be a punch is looked at; the strict rules decide what counts on its
+        // own, and the near misses are kept for your tags, marked exchanges and the trained model
+        if (sv[i] < 0.6 * th || t - lastT < A.REFRACTORY) continue;
         let isPeak = true;
         for (let j = i - 1; j >= 0 && t - rows[j].t <= A.PEAK_WIN; j--) if (sv[j] > sv[i]) { isPeak = false; break; }
         for (let j = i + 1; isPeak && j < rows.length && rows[j].t - t <= A.PEAK_WIN; j++) if (sv[j] >= sv[i]) isPeak = false;
         if (!isPeak) continue;
-        if (at(t + 0.08).r[sd].reach - at(t - 0.08).r[sd].reach <= 0.05) continue;  // must be extending
-        // furthest point of the punch
-        let far = rows[i];
-        for (const r of rows) if (r.t >= t - 0.05 && r.t <= t + 0.2 && r.r[sd].reach > far.r[sd].reach) far = r;
-        if (far.r[sd].reach < A.MIN_REACH || far.r[sd].vis < 0.5) continue;
-        const start = at(t - 0.15);
-        // a real punch travels a fair way...
-        const travel = Math.hypot(far.r[sd].rel[0] - start.r[sd].rel[0], far.r[sd].rel[1] - start.r[sd].rel[1]);
-        if (travel < A.MIN_TRAVEL) continue;
-        // ...towards an opponent who is actually there (gestures, guard shuffles and the referee's arms don't).
-        // The pose model can lose the opponent for a few frames as a big shot lands, so allow half a second.
-        const opp0 = nearest(1 - k, start.t, 0.5), opp1 = nearest(1 - k, far.t, 0.5);
-        if (!opp0 || !opp1) continue;
-        const aim = (op) => { const hd = pt(op.p, 0); return hd[2] > 0.3 ? hd : center(op.p); };
-        const approach = (d2(pt(start.p, wMi), aim(opp0)) - d2(pt(far.p, wMi), aim(opp1))) / torso(far.p);
-        if (approach < A.MIN_APPROACH) continue;
-        lastT = t;
-        const p = classify(k, sd, t, start, far);
-        p.feat = punchFeature(at, t, dirAt(k, t), sd, far, p.role);
-        out.push(p);
+        const c = candidate(i, sd);
+        if (!c) continue;
+        const strict = sv[i] >= th && rows[i].r[sd].vis >= 0.5 && c.far.r[sd].vis >= 0.5 && c.extending
+          && c.far.r[sd].reach >= A.MIN_REACH && c.travel >= A.MIN_TRAVEL && c.near && c.approach >= A.MIN_APPROACH;
+        const loose = c.travel >= 0.25 && c.approach >= 0.08 && c.oppSeen;
+        if (!strict && !loose) continue;
+        const p = makePunch(i, sd, c);
+        if (strict) { lastT = t; out.push(p); } else misses.push(p);
       }
 
       // feints: a sharp, short move towards the opponent that comes straight back instead of landing
@@ -425,6 +489,42 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
         feintCands.push({ f: k, t, tEnd: far.t, hand: sd, role: roleAt(k, sd, t) });
       }
     }
+
+    // the fastest hand movement near a moment (for things you called out that it didn't see)
+    const fastestNear = (t0, win) => {
+      let best = null;
+      for (const sd of sides) {
+        const sv = svs[sd] || [];
+        for (let i = 1; i < rows.length - 1; i++) if (Math.abs(rows[i].t - t0) <= win && (!best || sv[i] > best.v)) best = { i, sd, v: sv[i] };
+      }
+      return best;
+    };
+    const tags = overrides?.tags || [];
+    // a punch you called out: the near miss closest to that moment, else the fastest hand movement there
+    for (const tg of tags.filter((x) => x.f === k && x.kind === 'punch')) {
+      const have = out.find((p) => Math.abs(p.t - tg.t) <= 0.6);
+      if (have) { have.confirmed = true; continue; }
+      let p = misses.filter((m) => Math.abs(m.t - tg.t) <= 0.6).sort((a, b) => Math.abs(a.t - tg.t) - Math.abs(b.t - tg.t))[0];
+      if (p) misses.splice(misses.indexOf(p), 1);
+      else { const b = fastestNear(tg.t, 0.6); if (b) p = makePunch(b.i, b.sd, candidate(b.i, b.sd)); }
+      if (p) { p.tagged = true; out.push(p); }
+    }
+    // an exchange you marked: it's less strict in there and takes the near misses
+    for (const tg of tags.filter((x) => x.kind === 'exchange')) {
+      for (const m of misses.filter((x) => x.t >= tg.t - 1.5 && x.t <= tg.t + 1.5)) {
+        if (out.some((q) => q.hand === m.hand && Math.abs(q.t - m.t) < A.REFRACTORY)) continue;
+        m.fromExchange = true; out.push(m); misses.splice(misses.indexOf(m), 1);
+      }
+    }
+    // a feint you called out
+    for (const tg of tags.filter((x) => x.f === k && x.kind === 'feint')) {
+      const have = feintCands.find((c) => c.f === k && Math.abs(c.t - tg.t) <= 0.6);
+      if (have) { have.tagged = true; continue; }
+      const b = fastestNear(tg.t, 0.6);
+      const t = b ? rows[b.i].t : tg.t, hand = b ? b.sd : leadAt(k, tg.t);
+      feintCands.push({ f: k, t, tEnd: t + 0.15, hand, role: roleAt(k, hand, t), tagged: true });
+    }
+    allMisses.push(...misses);
     return out;
   }
 
@@ -480,9 +580,20 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     return peak > Math.max(1.8, 3 * noise);
   }
 
-  // lead or rear hand, from the fighter's stance
+  // lead or rear hand, from the fighter's stance. When a fighter turns away the pose model can swap
+  // left and right for a moment: if a known southpaw suddenly looks orthodox (or the other way round)
+  // just as he punches, the labels are swapped, so the hand it saw is really the other one.
   function roleAt(k, hand, t) {
-    return hand === leadAt(k, t) ? 'lead' : 'rear';
+    const role = hand === leadAt(k, t) ? 'lead' : 'rear';
+    return swappedAt(k, t) ? (role === 'lead' ? 'rear' : 'lead') : role;
+  }
+  function swappedAt(k, t) {
+    const st = stance[k];
+    if (!st.set && st.conf < 0.5) return false;
+    const loc = st.local.filter((x) => x.t >= t - 0.4 && x.t <= t + 0.1);
+    if (loc.length < 3) return false;
+    const orth = loc.filter((x) => x.s > 0).length / loc.length;
+    return st.lead === 'left' ? orth <= 0.25 : orth >= 0.75;
   }
 
   // How much a fighter is moving (head and hands, relative to their hips), torso lengths / s.
@@ -556,7 +667,19 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     return out;
   }
 
-  function classify(k, hand, t, start, far) {
+  // When the glove itself can't be seen, the hand is a calculated guess. A hidden hook thrown while not
+  // stepping in is almost always the lead hook (rear hooks need weight coming forward), and a lead hook
+  // thrown while stepping back or pivoting away is a check hook.
+  function settleRole(p) {
+    if (p.added) return;
+    const shape = SHAPE(p.label);
+    const mv = advance(p.f, p.t - 0.4, p.t + 0.3);
+    if (p.hidden && shape === 'hook' && p.role === 'rear' && mv < 0.3) { p.role = 'lead'; p.label = 'lead_hook'; p.guessed = true; }
+    // (the step or pivot away usually finishes just after the hook lands)
+    p.check = p.label === 'lead_hook' && Math.min(mv, advance(p.f, p.t - 0.3, p.t + 0.6)) < -0.1;
+  }
+
+  function classify(k, hand, t, start, far, vis = 1) {
     const dir = dirAt(k, t);
     const disp = [far.r[hand].rel[0] - start.r[hand].rel[0], far.r[hand].rel[1] - start.r[hand].rel[1]];
     const toward = disp[0] * dir, up = -disp[1];
@@ -575,7 +698,7 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
       const wy = pt(far.p, hand === 'left' ? 15 : 16)[1];
       target = wy > sy + 0.4 * (hy - sy) ? 'body' : 'head';
     }
-    const res = { f: k, t, hand, role, label, target, tEnd: far.t };
+    const res = { f: k, t, hand, role, label, target, tEnd: far.t, hidden: vis < 0.5, swapped: swappedAt(k, t) };
     res.outcome = outcomeOf(res, far, k);
     return res;
   }
@@ -743,6 +866,17 @@ function modelScale(m) {
 }
 // Returns false if the model says it wasn't a punch; may relabel it. Only punches that really look
 // like something you taught it are changed, and the built-in call keeps a vote of its own.
+// A near miss (not quite fast, far or clear enough) that sits right among punches you've taught it.
+function looksTaught(m, p) {
+  if (!p.feat || m.ex.length < 8) return false;
+  const scale = modelScale(m);
+  const near = m.ex.filter((e) => e.f.length === p.feat.length).map((e) => [fdist(e.f, p.feat), e.l])
+    .filter(([d]) => d <= scale).sort((a, b) => a[0] - b[0]).slice(0, 5);
+  if (near.length < 2) return false;
+  let yes = 0, all = 0;
+  for (const [d, l] of near) { const w = 1 / (d + 0.05); all += w; if (ROLE[l]) yes += w; }
+  return yes / all >= 0.75;
+}
 function applyModel(m, p) {
   if (!p.feat || m.ex.length < 8) return true;
   const scale = modelScale(m);
@@ -762,7 +896,7 @@ function applyModel(m, p) {
 }
 
 function pName(p, bare = false) {
-  const n = NAMES[p.label].toLowerCase();
+  const n = p.check ? 'lead check hook' : NAMES[p.label].toLowerCase();
   const tgt = p.target === 'body' ? ' to the body' : '';
   return bare ? n + tgt : `${/^[aeiou]/.test(n) ? 'an' : 'a'} ${n}${tgt}`;
 }
@@ -894,6 +1028,14 @@ export function initBreakdown({ root }) {
           <button type="button" class="mini" data-k="whonext">Try a later frame</button></div>
       </div>
       <div class="bd-progress" data-k="progress"><div class="bar"><i data-k="pbar"></i></div><span data-k="ptext">Reading the clip…</span><button type="button" class="mini" data-k="stop">Stop here</button></div>
+      <div class="bd-tagbar" data-k="tagbar" hidden>
+        <p class="bd-tag-title">Call it out as you watch: tap the moment it happens, and the AI looks closer there and learns from it.</p>
+        <div class="bd-tag-row f0"><b data-k="tg0">Fighter A</b>
+          <button type="button" class="mini" data-tag="punch" data-f="0">Punch</button><button type="button" class="mini" data-tag="feint" data-f="0">Feint</button><button type="button" class="mini" data-tag="level" data-f="0">Level change</button></div>
+        <div class="bd-tag-row f1"><b data-k="tg1">Fighter B</b>
+          <button type="button" class="mini" data-tag="punch" data-f="1">Punch</button><button type="button" class="mini" data-tag="feint" data-f="1">Feint</button><button type="button" class="mini" data-tag="level" data-f="1">Level change</button></div>
+        <div class="bd-tag-row"><button type="button" class="mini" data-tag="exchange">Exchange here</button><span class="bd-tag-note" data-k="tagnote"></span></div>
+      </div>
       <div class="bd-timeline" data-k="timeline" hidden></div>
       <div class="bd-legend" data-k="legend" hidden></div>
     </div>
@@ -942,6 +1084,21 @@ export function initBreakdown({ root }) {
     $('quality').querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
   });
   for (const k of ['n0', 'n1']) $(k).addEventListener('input', () => { if (result) render(); });
+  // calling things out while it analyses (or while you review): saved for this clip, looked at closely,
+  // and the punches become training examples for the fight model
+  const tagLabels = () => { const nm = names(); $('tg0').textContent = nm[0]; $('tg1').textContent = nm[1]; };
+  const TAG_WORD = { punch: 'punch', feint: 'feint', level: 'level change', exchange: 'exchange' };
+  $('tagbar').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-tag]'); if (!b) return;
+    // allow for reaction time (about a third of a second, scaled to the playback speed)
+    const t = Math.max(0, video.currentTime - (video.paused ? 0 : 0.35 * video.playbackRate));
+    const kind = b.dataset.tag, f = b.dataset.f != null ? Number(b.dataset.f) : null;
+    overrides.tags = [...(overrides.tags || []), { kind, f, t: Math.round(t * 100) / 100 }];
+    saveFixes();
+    const who = f != null ? `${names()[f]}'s ` : '';
+    $('tagnote').textContent = `Got it: ${who}${TAG_WORD[kind]} at ${fmt(t)}${processing ? ', it will look closely there' : ''}.`;
+    if (!processing && result) reanalyse();
+  });
   // a name with a remembered stance re-reads that fighter's punches once you've finished typing
   for (const k of ['n0', 'n1', 'wn0', 'wn1']) $(k).addEventListener('change', () => { if (result) reanalyse(); });
   // names typed in the who's-who step become the fighters' names everywhere (boxes, write-up, voice-over)
@@ -958,7 +1115,7 @@ export function initBreakdown({ root }) {
   async function run(file) {
     stopAll();
     $('status').textContent = ''; $('status').classList.remove('error');
-    $('results').hidden = true; $('timeline').hidden = true; $('legend').hidden = true;
+    $('results').hidden = true; $('timeline').hidden = true; $('legend').hidden = true; $('tagbar').hidden = true;
     $('player').hidden = false; $('progress').hidden = false;
     $('ptext').textContent = 'Loading the pose model…'; $('pbar').style.width = '0%';
     let lmk;
@@ -981,6 +1138,7 @@ export function initBreakdown({ root }) {
     const confirmed = await chooseWho(lmk, sampler, w, h);
     if (!confirmed) return;
     tracker.init(confirmed.dets, confirmed.apps, confirmed.roles);
+    tagLabels(); $('tagbar').hidden = false; $('tagnote').textContent = '';
 
     // 2. track the whole clip
     $('progress').hidden = false;
@@ -1248,6 +1406,7 @@ export function initBreakdown({ root }) {
     }
     $('progress').hidden = true;
     result = analyse(frames, opts());
+    if (learnFromTags()) result = analyse(frames, opts());
     const secs = Math.max(1, (frames.length ? frames[frames.length - 1].t : video.currentTime) || video.duration || 1);
     if (frames.length < secs * 3) {
       $('status').textContent = 'Only part of the clip could be read (the app was probably in the background). Keep it open on screen and try again.';
@@ -1419,6 +1578,11 @@ export function initBreakdown({ root }) {
       const d = document.createElement('i'); d.className = `bd-level f${lv.f}`; d.style.left = `${(lv.t / dur) * 100}%`; d.title = `${nm[lv.f]} level change`;
       tl.append(d);
     }
+    for (const tg of overrides.tags || []) {
+      const d = document.createElement('i'); d.className = `bd-tagmark${tg.f != null ? ` f${tg.f}` : ''}`; d.style.left = `${(tg.t / dur) * 100}%`;
+      d.title = `You called: ${tg.f != null ? `${nm[tg.f]} ` : ''}${TAG_WORD[tg.kind]} at ${fmt(tg.t)}`;
+      tl.append(d);
+    }
     for (const kd of res.knockdowns) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'bd-kd';
       b.style.left = `${(kd.t / dur) * 100}%`; b.title = `Knockdown: ${nm[kd.f]} down`; b.setAttribute('aria-label', `Watch the knockdown at ${fmt(kd.t)}`);
@@ -1505,7 +1669,7 @@ export function initBreakdown({ root }) {
       const h = document.createElement('div');
       h.innerHTML = '<p class="bd-when num"></p><p class="bd-title"></p>';
       h.firstChild.textContent = `${fmt(ex.start)} · ${(ex.end - ex.start).toFixed(1)} s`;
-      h.lastChild.replaceChildren(document.createTextNode(`Exchange ${ex.n} · `), fill(`{${ex.init}} leads`, nm));
+      h.lastChild.replaceChildren(document.createTextNode(`Exchange ${ex.n}${ex.init == null ? ' (marked by you)' : ' · '}`), ...(ex.init == null ? [] : [fill(`{${ex.init}} leads`, nm)]));
       const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'mini'; btn.textContent = 'Watch ½×';
       btn.addEventListener('click', () => watch(ex));
       top.append(h, btn);
@@ -1515,8 +1679,8 @@ export function initBreakdown({ root }) {
         const li = document.createElement('li');
         const b = document.createElement('button'); b.type = 'button';
         b.className = `f${p.f} o-${p.outcome || 'unknown'}${p.corrected ? ' fixed' : ''}`;
-        b.textContent = `${OUTCOME_ICON[p.outcome] || ''} ${NAMES[p.label]}${p.target === 'body' ? ' ↓' : ''}`.trim();
-        b.title = `${nm[p.f]} · ${fmt(p.t)} · ${p.outcome || 'outcome unknown'} · tap to correct`;
+        b.textContent = `${OUTCOME_ICON[p.outcome] || ''} ${p.check ? 'Lead check hook' : NAMES[p.label]}${p.target === 'body' ? ' ↓' : ''}${p.guessed || p.hidden ? ' ?' : ''}${p.tagged ? ' ★' : ''}`.trim();
+        b.title = `${nm[p.f]} · ${fmt(p.t)} · ${p.outcome || 'outcome unknown'}${p.hidden ? ' · glove hidden, hand is a calculated guess' : ''}${p.swapped ? ' · left/right corrected from stance' : ''}${p.tagged ? ' · you called this one' : ''} · tap to correct`;
         b.addEventListener('click', () => openFix(p, fixBox));
         li.append(b); seq.append(li);
       }
@@ -1554,7 +1718,7 @@ export function initBreakdown({ root }) {
       R.append(c);
     }
     const legend = document.createElement('p'); legend.className = 'hint-text';
-    legend.textContent = '✓ landed · ⊘ blocked · ✗ missed · ↓ to the body. Tap any punch to correct it: every correction teaches the fight model. Tap a winner to overrule the scoring.';
+    legend.textContent = '✓ landed · ⊘ blocked · ✗ missed · ↓ to the body · ? glove hidden, a calculated guess · ★ you called it. Tap any punch to correct it: every correction teaches the fight model. Tap a winner to overrule the scoring.';
     R.append(legend);
 
     // missed a knockdown? pause on it and mark it
@@ -1572,6 +1736,19 @@ export function initBreakdown({ root }) {
     const M = (k) => mk.querySelector(`[data-m="${k}"]`);
     nm.forEach((n, k) => M('pf').append(new Option(n, String(k))));
     for (const l of Object.keys(NAMES)) M('pl').append(new Option(NAMES[l], l));
+    // what you've called out on this clip, with a way to take one back
+    if ((overrides.tags || []).length) {
+      const sub = document.createElement('p'); sub.className = 'bd-mark-sub'; sub.textContent = 'Your call-outs';
+      const list = document.createElement('div'); list.className = 'bd-taglist';
+      overrides.tags.forEach((tg, i) => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = `mini${tg.f != null ? ` f${tg.f}` : ''}`;
+        b.textContent = `${fmt(tg.t)} ${tg.f != null ? `${nm[tg.f]} ` : ''}${TAG_WORD[tg.kind]} ✕`;
+        b.title = 'Remove this call-out';
+        b.addEventListener('click', () => { overrides.tags = overrides.tags.filter((_, j) => j !== i); saveFixes(); reanalyse(); });
+        list.append(b);
+      });
+      mk.append(sub, list);
+    }
     M('padd').addEventListener('click', () => {
       const t = video.currentTime, f = Number(M('pf').value), label = M('pl').value;
       overrides.add = [...(overrides.add || []).filter((m) => !(m.f === f && Math.abs(m.t - t) < 0.25)), { f, t, label, outcome: M('po').value }];
@@ -1679,7 +1856,26 @@ export function initBreakdown({ root }) {
   function reanalyse() {
     if (!frames.length) return;
     result = analyse(frames, opts());
+    if (learnFromTags()) result = analyse(frames, opts());
     render();
+  }
+
+  // Punches you called out (or confirmed by tapping Punch on one it found) become training examples, so
+  // on the next clip it picks up similar movements on its own. Each one is only learned once.
+  function learnFromTags() {
+    if (!result) return false;
+    const taught = new Set(overrides.taught || []);
+    let n = 0;
+    for (const p of result.punches) {
+      if (!(p.tagged || p.confirmed || p.fromExchange) || !p.feat || p.corrected) continue;
+      const key = punchKey(p);
+      if (taught.has(key)) continue;
+      fightModel.ex.push({ l: p.label, f: p.feat }); taught.add(key); n++;
+    }
+    if (!n) return false;
+    overrides.taught = [...taught];
+    saveFightModel(fightModel); saveFixes();
+    return true;
   }
 
   return {

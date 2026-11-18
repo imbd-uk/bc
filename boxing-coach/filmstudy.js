@@ -199,7 +199,7 @@ export function buildScript(res, frames, names, readLines = []) {
     const c = kd.cause, h = kd.hiddenHand;
     beats.push({
       t: Math.min(tEnd, kd.t + 0.4), kind: 'knockdown', label: 'Knockdown',
-      text: `Knockdown! ${N(kd.f)} goes down${c ? `, and it's the ${lowerName(c.label)}${c.target === 'body' ? ' to the body' : ''} from ${N(1 - kd.f)} that does it`
+      text: `Knockdown! ${N(kd.f)} goes down${c ? `, and it's the ${c.check ? 'lead check hook' : lowerName(c.label)}${c.target === 'body' ? ' to the body' : ''} from ${N(1 - kd.f)} that does it${c.check ? `, thrown as ${N(1 - kd.f)} pivots away` : ''}${c.inferred ? '. The glove is hidden from this angle, but the body tells you what it was' : ''}`
         : h ? `. ${N(1 - kd.f)} lands the ${h.role} hand, and it's so quick the camera barely sees it` : `. ${N(1 - kd.f)} wins that one outright`}.`,
       marks: [{ type: 'spot', f: kd.f }, { type: 'tag', f: kd.f, text: 'KNOCKDOWN' }],
     });

@@ -66,6 +66,17 @@ The app has four pages, switched with the tab bar at the bottom:
   shape (straight, hook, uppercut). Each fighter card has an Orthodox/Southpaw switch, and correcting a
   jab to a cross (or any lead/rear mix-up) flips that fighter's stance and re-reads all their punches.
   **Missed something?** Pause on the moment to add a punch it didn't see (who, which punch, landed or not).
+  **Call it out as you watch:** while it analyses (and while you review) a bar under the video has
+  Punch / Feint / Level change buttons for each fighter and **Exchange here**. Tap at the moment it
+  happens (it allows for reaction time). It then looks closer there: a called punch becomes the nearest
+  near miss or the fastest hand movement, classified as usual; in a marked exchange it accepts the punches
+  that only just missed its strict rules. Called punches become training examples, so similar movements
+  are picked up on their own in later clips. Call-outs are listed (tap ✕ to remove) and marked on the timeline.
+  **Hidden gloves:** when the glove can't be seen (? on the punch) the hand is a calculated guess: the
+  stance decides lead or rear; if a known southpaw briefly looks orthodox the pose model has swapped
+  left and right, so it flips the hand; a hidden hook thrown while not stepping in is a lead hook, and a
+  lead hook thrown while stepping back or pivoting away is a **lead check hook**. A knockdown with no clear
+  punch takes the best near miss just before the fall as its cause.
   **Thorough** mode (default) reads the clip at ¼ speed, then a second pass re-decides who's who for
   every frame using the whole clip, so one-frame swaps and flickers are removed. Review plays at normal
   speed with skeletons gliding between analysed frames. Each punch is marked **landed / blocked /
