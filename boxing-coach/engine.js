@@ -18,9 +18,13 @@ const C = {
   STARTER_CONF: 0.7, STARTER_MIN_SPEED: 2.0, STARTER_RECOVERY: 0.9,
   MOTION_SPEED: 0.1,        // shoulder widths per frame (default trigger, before teaching)
   MOTION_LOOKAHEAD: 6,      // frames after the peak before deciding (0.2 s)
-  MOTION_REFRACTORY: 0.35,  // s between punches
+  MOTION_REFRACTORY: 0.3,   // s between punches from the same hand
+  MOTION_MIN_GAP: 0.12,     // s between punches from different hands (fast 1-2s)
   MAX_GAP: 0.3,             // s without a usable frame before the stream restarts
+  STILL: 0.04,              // both wrists slower than this = holding guard
+  LEAD_HYST: 0.05,          // stance score needed before the lead hand flips
 };
+const HANDS = ['left', 'right'];
 
 export class Engine {
   constructor(pose, starter) {
@@ -33,21 +37,27 @@ export class Engine {
 
   reset() {
     this.stream = [];       // resampled frames
-    this.speed = [];        // smoothed wrist speed per stream frame
-    this.reach = [];        // max wrist-to-shoulder distance per stream frame
+    this.speed = [[], []];  // wrist speed per stream frame, [left, right]
+    this.reach = [[], []];  // wrist-to-own-shoulder distance per stream frame, [left, right]
     this.last = null;
     this.nextT = null;
     this.starterUntil = -Infinity;
-    this.lastMotionT = -Infinity;
+    this.lastMotionT = [-Infinity, -Infinity];
+    this.lastAnyT = -Infinity;
     this.lastSeenT = -Infinity;
+    this.leadEma = 0; this.leadN = 0; this.lead = null;
+    this.guard = null;
   }
 
-  // Returns { landmarks, stance, tracking, events: [...] }
+  // Returns { landmarks, stance, lead, guard, tracking, events: [...] }
+  //   lead:  'left' / 'right' hand forward, read from the guard between punches
+  //   guard: this frame's raw stance score while holding still (negative = left leads), else null
   process(source, w, h, t) {
     const res = this.pose.detectForVideo(source, performance.now());
     const lm = res.landmarks && res.landmarks[0];
     const wl = res.worldLandmarks && res.worldLandmarks[0];
     const events = [];
+    this.guard = null;
     let stance = null;
     if (lm && wl) {
       const f = toFrame(lm, wl, w, h, t);
@@ -57,13 +67,21 @@ export class Engine {
         for (const g of this.resample(f)) this.onGridFrame(g, events);
       }
     }
-    return { landmarks: lm ? { lm, w, h } : null, stance, tracking: t - this.lastSeenT < 1, events };
+    if (this.lead) stance = this.lead === 'left' ? 'Orthodox' : 'Southpaw';
+    return { landmarks: lm ? { lm, w, h } : null, stance, lead: this.lead, guard: this.guard, tracking: t - this.lastSeenT < 1, events };
+  }
+
+  // The hand that moved fastest over the last ~0.3 s.
+  recentHand() {
+    const top = (v) => Math.max(0, ...v.slice(-10));
+    const l = top(this.speed[0]), r = top(this.speed[1]);
+    return l || r ? HANDS[r > l ? 1 : 0] : null;
   }
 
   resample(f) {
     const out = [];
     if (!this.last || f.t - this.last.t > C.MAX_GAP || f.t < this.last.t) {
-      this.stream = []; this.speed = []; this.reach = [];
+      this.stream = []; this.speed = [[], []]; this.reach = [[], []];
       this.last = f; this.nextT = f.t;
     }
     const a = this.last;
@@ -80,9 +98,22 @@ export class Engine {
     const s = this.stream;
     const prev = s[s.length - 1];
     s.push(g);
-    this.reach.push(reachOf(g));
-    this.speed.push(prev ? wristSpeed(prev, g) : 0);
-    if (s.length > 60) { s.shift(); this.speed.shift(); this.reach.shift(); }
+    const sp = prev ? wristSpeeds(prev, g) : [0, 0];
+    const rc = reaches(g);
+    for (const h of [0, 1]) { this.speed[h].push(sp[h]); this.reach[h].push(rc[h]); }
+    if (s.length > 60) { s.shift(); for (const h of [0, 1]) { this.speed[h].shift(); this.reach[h].shift(); } }
+
+    // --- stance: while holding guard, which hand (and shoulder) sits closer to the camera
+    if (prev && sp[0] < C.STILL && sp[1] < C.STILL) {
+      const sc = stanceScore(g);
+      if (sc != null) {
+        this.guard = sc;
+        this.leadEma = this.leadN ? this.leadEma * 0.95 + sc * 0.05 : sc;
+        this.leadN++;
+        if (this.leadEma < -C.LEAD_HYST) this.lead = 'left';
+        else if (this.leadEma > C.LEAD_HYST) this.lead = 'right';
+      }
+    }
 
     // --- starter model (original LSTM, original gates)
     if (this.useStarter && s.length >= C.SEQ && g.t >= this.starterUntil) {
@@ -92,25 +123,32 @@ export class Engine {
         const { index, confidence } = this.starter.predict(seq);
         if (confidence > C.STARTER_CONF && originalSpeed(win) > C.STARTER_MIN_SPEED) {
           this.starterUntil = g.t + C.STARTER_RECOVERY;
-          events.push({ kind: 'punch', label: STARTER_LABELS[index], confidence, model: 'starter', t: g.t });
+          events.push({ kind: 'punch', label: STARTER_LABELS[index], confidence, model: 'starter', hand: this.recentHand(), t: g.t });
         }
       }
     }
 
-    // --- motion detector: a wrist-speed peak while the arm is extending
-    const n = this.speed.length - 1;
+    // --- motion detector: a wrist-speed peak while that arm is extending.
+    // Each hand is tracked on its own, so a fast jab-cross gives two punches, not one.
+    const n = s.length - 1;
     const L = C.MOTION_LOOKAHEAD;
     const p = n - L;
     if (s.length >= C.SEQ && p >= 2) {
-      const sm = (i) => (this.speed[i - 1] + this.speed[i] + this.speed[i + 1]) / 3;
-      const sp = sm(p);
-      let isPeak = sp >= this.motionSpeed;
-      for (let i = Math.max(1, p - L); isPeak && i <= n - 1; i++) if (i !== p && sm(i) > sp) isPeak = false;
-      const extending = this.reach[p + 1] - this.reach[p - 2] > 0;
+      const cands = [];
+      for (const h of [0, 1]) {
+        const v = this.speed[h], r = this.reach[h];
+        const sm = (i) => (v[i - 1] + v[i] + v[i + 1]) / 3;
+        const pk = sm(p);
+        let isPeak = pk >= this.motionSpeed;
+        for (let i = Math.max(1, p - L); isPeak && i <= n - 1; i++) if (i !== p && sm(i) > pk) isPeak = false;
+        if (isPeak && r[p + 1] - r[p - 2] > 0) cands.push({ h, pk });
+      }
+      cands.sort((a, b) => b.pk - a.pk);
       const pt = s[p].t;
-      if (isPeak && extending && pt - this.lastMotionT >= C.MOTION_REFRACTORY) {
-        this.lastMotionT = pt;
-        events.push({ kind: 'motion', features: features(s.slice(-C.SEQ)), speed: sp, t: pt });
+      for (const { h, pk } of cands) {
+        if (pt - this.lastMotionT[h] < C.MOTION_REFRACTORY || pt - this.lastAnyT < C.MOTION_MIN_GAP) continue;
+        this.lastMotionT[h] = pt; this.lastAnyT = pt;
+        events.push({ kind: 'motion', features: features(s.slice(-C.SEQ)), speed: pk, hand: HANDS[h], t: pt });
       }
     }
   }
@@ -168,30 +206,37 @@ function originalSpeed(frames) {
   return best;
 }
 
-// Wrist speed relative to the shoulders, in shoulder widths per frame.
+// Wrist speed relative to the shoulders, in shoulder widths per frame, as [left, right].
 // Uses 3D (catches punches thrown straight at the camera) and 2D, whichever is larger.
-function wristSpeed(a, b) {
+function wristSpeeds(a, b) {
   const sw3 = Math.hypot(b.world[0] - b.world[3], b.world[1] - b.world[4], b.world[2] - b.world[5]) || 1;
   const sw2 = Math.hypot(b.pts[0] - b.pts[2], b.pts[1] - b.pts[3]) || 1;
-  let best = 0;
-  for (const wi of [4, 5]) {
-    if (b.conf[wi] < C.KP_CONF) continue;
+  return [4, 5].map((wi) => {
+    if (b.conf[wi] < C.KP_CONF) return 0;
     const rel = (f, k) => f.world[wi * 3 + k] - (f.world[k] + f.world[3 + k]) / 2;
     const d3 = Math.hypot(rel(b, 0) - rel(a, 0), rel(b, 1) - rel(a, 1), rel(b, 2) - rel(a, 2)) / sw3;
     const rel2 = (f, k) => f.pts[wi * 2 + k] - (f.pts[k] + f.pts[2 + k]) / 2;
     const d2 = Math.hypot(rel2(b, 0) - rel2(a, 0), rel2(b, 1) - rel2(a, 1)) / sw2;
-    best = Math.max(best, d3, d2);
-  }
-  return best;
+    return Math.max(d3, d2);
+  });
 }
 
-// How far the hands are from their own shoulders (3D, shoulder widths).
-function reachOf(f) {
+// How far each hand is from its own shoulder (3D, shoulder widths), as [left, right].
+function reaches(f) {
   const w = f.world;
   const sw = Math.hypot(w[0] - w[3], w[1] - w[4], w[2] - w[5]) || 1;
   const l = Math.hypot(w[12] - w[0], w[13] - w[1], w[14] - w[2]);
   const r = Math.hypot(w[15] - w[3], w[16] - w[4], w[17] - w[5]);
-  return Math.max(l, r) / sw;
+  return [l / sw, r / sw];
+}
+
+// In guard the lead hand and lead shoulder sit nearer the camera (smaller world z).
+// Negative = left side forward (orthodox), positive = right side forward (southpaw).
+function stanceScore(f) {
+  if ([0, 1, 4, 5].some((i) => f.conf[i] < C.KP_CONF)) return null;
+  const w = f.world;
+  const sw = Math.hypot(w[0] - w[3], w[1] - w[4], w[2] - w[5]) || 1;
+  return ((w[14] - w[17]) + 0.5 * (w[2] - w[5])) / sw;
 }
 
 // Original detect_stance().

@@ -87,7 +87,7 @@
     <header class="page-head">
       <p class="eyebrow">Teach the AI</p>
       <h1>Train it on <span class="dim">your</span> punches.</h1>
-      <p class="lede">Throw each punch when asked. The app learns your style and your camera angle, on this phone.</p>
+      <p class="lede">It reads your stance, then learns each punch and your combos. Your style and camera angle stay on this phone.</p>
     </header>
 
     <div class="card score-card" id="score-card" hidden>
@@ -99,8 +99,26 @@
     </div>
 
     <div class="card">
-      <p class="card-title">Your examples</p>
+      <p class="card-title">Your stance</p>
+      <div class="row">
+        <span class="row-label" id="stance-now">Not read yet</span>
+        <div class="seg" role="radiogroup" aria-label="Lead hand" id="stance-seg">
+          <button type="button" role="radio" data-value="left">Orthodox</button>
+          <button type="button" role="radio" data-value="right">Southpaw</button>
+        </div>
+      </div>
+      <p class="card-sub" id="stance-sub">Read from your guard at the start of teaching. Tap to correct it.</p>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Your punches</p>
       <ul class="punch-list" id="punch-list"></ul>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Your combos</p>
+      <ul class="punch-list" id="combo-list"></ul>
+      <p class="card-sub">Teaching combos helps it call punches thrown fast together, and name the combo out loud.</p>
     </div>
 
     <button id="btn-teach" class="btn primary" type="button" disabled>Loading coach…</button>
@@ -136,13 +154,16 @@
     </article>
 
     <article class="card tip">
-      <p class="card-title">The four punches</p>
+      <p class="card-title">The six punches</p>
       <dl class="punch-defs">
         <dt>Jab</dt><dd>Lead hand, straight out from the chin. Fast, turn the fist over at the end.</dd>
         <dt>Cross</dt><dd>Rear hand, straight. Pivot the back foot and turn the hips through.</dd>
-        <dt>Hook</dt><dd>Elbow bent about 90°, arm level with the floor. The power comes from turning the body.</dd>
-        <dt>Uppercut</dt><dd>Short upward punch, palm facing you. Dip the knees slightly and drive up.</dd>
+        <dt>Lead hook</dt><dd>Lead hand, elbow bent about 90°, arm level with the floor. Pivot on the lead foot and turn the body.</dd>
+        <dt>Rear hook</dt><dd>Same shape with the rear hand. Drive the back hip through, like a cross that curves.</dd>
+        <dt>Lead uppercut</dt><dd>Lead hand, short and upward, palm facing you. Dip onto the lead side and drive up.</dd>
+        <dt>Rear uppercut</dt><dd>Rear hand, upward. Dip slightly, then drive up off the back foot.</dd>
       </dl>
+      <p class="card-sub">Orthodox: left hand leads. Southpaw: right hand leads.</p>
     </article>
 
     <article class="card tip">

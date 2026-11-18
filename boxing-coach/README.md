@@ -1,7 +1,8 @@
 # Boxing Coach
 
 A phone web app for shadow boxing. It watches you through the camera, recognises
-jab, cross, hook and uppercut, calls them out loud, and counts punches and combos.
+jab, cross, lead and rear hooks, and lead and rear uppercuts, calls them out loud,
+and counts punches and names your combos.
 It has an optional round timer (2 or 3 minute rounds with 1 minute rest).
 
 Everything runs on the phone. The camera feed is never uploaded or saved.
@@ -40,9 +41,13 @@ The app has four pages, switched with the tab bar at the bottom:
 
 - **Analyse**: start a shadow-boxing session (front/back camera, round timer, voice calls),
   or score a recorded video.
-- **Teach**: train the AI on your own punches. It asks for 10 jabs, crosses, hooks and
-  uppercuts, learns them on the phone, and shows a self-test score. Redo any punch it
-  gets wrong. Once each punch has 5+ examples, Analyse uses **your model**.
+- **Teach**: train the AI on your own style. It first reads your stance from your guard
+  (orthodox or southpaw, which you can correct), then asks for 10 of each of the six punches,
+  then 5 reps of each combo (jab-cross, double jab-cross, jab-cross-lead hook,
+  jab-rear uppercut-lead hook, cross-lead hook-cross, lead uppercut-rear hook). It learns
+  them on the phone and shows a self-test score. Redo any punch or combo it gets wrong.
+  Once each punch has 5+ examples, Analyse uses **your model**, which also uses which hand
+  moved (lead or rear) and your taught combos to call fast punches, and says the combo name.
 - **Tips**: setup, accuracy and technique tips.
 - **Lessons**: placeholder for future guided drills.
 
@@ -68,7 +73,7 @@ Prop the phone at chest height, 2–3 m away, so your shoulders, hands and hips 
 |---|---|
 | `index.html`, `styles.css`, `app.js` | Pages, sessions and Teach mode |
 | `engine.js` | Pose → 30 fps stream → punch detection |
-| `personal.js` | Your model: taught examples, k-nearest-neighbour classifier, self-test |
+| `personal.js` | Your model: stance, taught punches and combos, k-nearest-neighbour classifier, self-test |
 | `plexus.js` | Animated background |
 | `lstm.js` | Starter punch classifier (original project's network) |
 | `models/` | Pose model and converted classifier weights |

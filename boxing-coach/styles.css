@@ -134,7 +134,12 @@ h1 .dim, .dim { color: var(--fg-3); }
 .punch-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .punch-row { display: grid; grid-template-columns: 82px 1fr auto auto; gap: 12px; align-items: center; padding: 8px 0; }
 .punch-row + .punch-row { border-top: 1px solid var(--stroke); }
-.punch-name { font-weight: 600; text-transform: capitalize; }
+.punch-name { font-weight: 600; }
+.punch-list .punch-row { grid-template-columns: minmax(0, 1.4fr) minmax(48px, 1fr) auto auto; }
+.punch-row.combo-row { grid-template-columns: minmax(0, 1.4fr) minmax(48px, 1fr) auto auto; }
+.combo-row .punch-name { text-transform: none; font-size: 14px; }
+.card-sub { margin: 10px 0 0; font-size: 13px; color: var(--fg-3); }
+.teach-step .big.long { font-size: 24px; text-transform: none; }
 .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
 .bar > i { display: block; height: 100%; border-radius: 3px; background: var(--fg); transition: width 0.4s; }
 .bar.full > i { background: var(--good); }
@@ -147,7 +152,7 @@ h1 .dim, .dim { color: var(--fg-3); }
 /* tips */
 .tip ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--fg); }
 .tip li::marker { color: var(--fg-3); }
-.punch-defs { margin: 0; display: grid; grid-template-columns: 76px 1fr; gap: 10px 12px; }
+.punch-defs { margin: 0; display: grid; grid-template-columns: 96px 1fr; gap: 10px 12px; }
 .punch-defs dt { font-weight: 600; }
 .punch-defs dd { margin: 0; color: var(--fg-2); }
 
@@ -282,8 +287,8 @@ h1 .dim, .dim { color: var(--fg-3); }
 .sheet .stats4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .sheet .stat { padding: 12px 14px; border-radius: 14px; background: var(--glass); border: 1px solid var(--stroke); }
 .bars { display: grid; gap: 10px; }
-.bars .brow { display: grid; grid-template-columns: 76px 1fr 40px; gap: 10px; align-items: center; font-size: 14px; }
-.bars .bname { text-transform: capitalize; color: var(--fg-2); }
+.bars .brow { display: grid; grid-template-columns: 112px 1fr 40px; gap: 10px; align-items: center; font-size: 14px; }
+.bars .bname { color: var(--fg-2); }
 .bars .bn { text-align: right; font-variant-numeric: tabular-nums; }
 .sheet-note { margin: 0; color: var(--fg-2); font-size: 14px; }
 
