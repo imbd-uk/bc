@@ -8,7 +8,7 @@ import { NAMES, ROLE, matchCombo } from './personal.js';
 import { voice } from './voice.js';
 import {
   BONES, COLORS, REF_COLOR, pt, mid, d2, center, torso, elbowAngle, packPose, box, Sampler, Tracker, isDown, refScore,
-  smoothIdentities, KEEP,
+  smoothIdentities, KEEP, sigDist, stanceVote,
 } from './people.js';
 
 export { BONES, COLORS, pt, mid, center, torso, packPose, Tracker };
@@ -28,6 +28,11 @@ const A = {
   DOWN_MIN: 0.5,      // s on the canvas that counts as a knockdown
   COUNT_PAUSE: 4,     // s after a knockdown when punches aren't counted (the count)
 };
+
+// A punch type is a shape (straight, hook, uppercut) thrown with the lead or rear hand. The shape comes
+// from how the fist moves; lead or rear comes from the fighter's stance, never from the shape.
+const SHAPE = (l) => (l === 'jab' || l === 'cross' ? 'straight' : l.split('_')[1]);
+const withRole = (shape, role) => (shape === 'straight' ? (role === 'lead' ? 'jab' : 'cross') : `${role}_${shape}`);
 
 // ---------------------------------------------------------------- analysis
 // frames: [{ t, poses: [poseA|null, poseB|null], ref: pose|null, cut: bool }]  (pose = packPose output)
@@ -74,6 +79,35 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     return ((b - a) * dirAt(k, t0)) / torsoAvg[k];
   };
 
+  // Stance: which hand leads. Read over the whole clip from the shoulders, hips, knees and feet together:
+  // one moment is noisy (a punch turns the shoulders, side-on bodies overlap), but a fighter's stance
+  // hardly ever changes. You can also set it, and it's remembered for that fighter's name.
+  const stance = [0, 1].map((k) => {
+    const set = overrides?.stance?.[k];
+    if (set) return { lead: set === 'southpaw' ? 'right' : 'left', set: true, conf: 1, local: [] };
+    const local = [];
+    for (const f of series[k]) {
+      const op = nearest(1 - k, f.t, 0.3);
+      if (!op || isDown(f.p, torsoAvg[k])) continue;
+      const s = stanceVote(f.p, op.p);
+      if (s) local.push({ t: f.t, s });
+    }
+    const share = local.length ? local.filter((x) => x.s > 0).length / local.length : 0.5;
+    return { lead: share >= 0.5 ? 'left' : 'right', set: false, conf: Math.abs(share - 0.5) * 2, local };
+  });
+  // a switch-hitter: a clear run of the other stance around this moment overrules the clip-wide read
+  const leadAt = (k, t) => {
+    const st = stance[k];
+    if (st.set) return st.lead;
+    const near = st.local.filter((x) => Math.abs(x.t - t) <= 3);
+    if (near.length >= 20) {
+      const lf = near.filter((x) => x.s > 0).length / near.length;
+      if (lf >= 0.85) return 'left';
+      if (lf <= 0.15) return 'right';
+    }
+    return st.lead;
+  };
+
   let knockdowns = findKnockdowns();
   // knockdowns you marked or removed by hand win over the detector
   if (overrides?.kdOff) knockdowns = knockdowns.filter((kd) => !overrides.kdOff.some((t) => Math.abs(t - kd.t) < 1));
@@ -95,15 +129,25 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     punches = punches.filter((p) => {
       const probs = punchProbs(net, p.feat);
       if (!probs) return true;
-      const [best, conf] = Object.entries(probs).sort((a, b) => b[1] - a[1])[0];
-      p.net = { label: best, conf };
-      if (best === 'none') return conf < 0.8;            // only drop it when the network is very sure
-      if (conf >= 0.45 && ROLE[best]) { p.label = best; p.role = ROLE[best]; }
+      if ((probs.none || 0) >= 0.8) return false;        // only drop it when the network is very sure
+      // the network picks the shape; the stance decides lead or rear
+      const shapes = {};
+      for (const [l, v] of Object.entries(probs)) if (ROLE[l]) shapes[SHAPE(l)] = (shapes[SHAPE(l)] || 0) + v;
+      const [shape, conf] = Object.entries(shapes).sort((a, b) => b[1] - a[1])[0];
+      p.net = { shape, conf };
+      if (conf >= 0.45) p.label = withRole(shape, p.role);
       return true;
     });
   }
   // what you've taught it from corrections overrides the built-in rules
   if (model) punches = punches.filter((p) => applyModel(model, p));
+  // punches it missed that you added by hand (the hand comes from the punch type and the stance)
+  for (const m of overrides?.add || []) {
+    if (punches.some((p) => p.f === m.f && Math.abs(p.t - m.t) < 0.25)) continue;
+    const role = ROLE[m.label], lead = leadAt(m.f, m.t);
+    const hand = role === 'lead' ? lead : lead === 'left' ? 'right' : 'left';
+    punches.push({ f: m.f, t: m.t, tEnd: m.t + 0.2, hand, role, label: m.label, target: m.target || 'head', outcome: m.outcome || null, added: true, corrected: true });
+  }
   // corrections you made on this clip win over everything
   if (overrides) {
     punches = punches.filter((p) => {
@@ -203,6 +247,7 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   const duration = frames.length ? frames[frames.length - 1].t - frames[0].t : 0;
   return {
     punches, exchanges, duration, knockdowns, refIn, feints, levels,
+    stance: stance.map((s) => ({ lead: s.lead, set: s.set, conf: s.conf, name: s.lead === 'left' ? 'orthodox' : 'southpaw' })),
     stats: [0, 1].map((k) => ({
       ...fighterStats(k, punches, exchanges, duration, knockdowns),
       feints: feints.filter((x) => x.f === k).length,
@@ -435,16 +480,9 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     return peak > Math.max(1.8, 3 * noise);
   }
 
-  // lead or rear hand: the lead shoulder is the one nearer the opponent just before t
+  // lead or rear hand, from the fighter's stance
   function roleAt(k, hand, t) {
-    const dir = dirAt(k, t);
-    let lead = 0, n = 0;
-    for (const f of series[k]) {
-      if (f.t < t - 0.6 || f.t > t - 0.1) continue;
-      lead += (pt(f.p, 11)[0] - pt(f.p, 12)[0]) * dir; n++;
-    }
-    if (!n) { const f = nearest(k, t); if (f) lead = (pt(f.p, 11)[0] - pt(f.p, 12)[0]) * dir; }
-    return hand === (lead >= 0 ? 'left' : 'right') ? 'lead' : 'rear';
+    return hand === leadAt(k, t) ? 'lead' : 'rear';
   }
 
   // How much a fighter is moving (head and hands, relative to their hips), torso lengths / s.
@@ -523,15 +561,7 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     const disp = [far.r[hand].rel[0] - start.r[hand].rel[0], far.r[hand].rel[1] - start.r[hand].rel[1]];
     const toward = disp[0] * dir, up = -disp[1];
     const elbow = elbowAngle(far.p, hand);
-    // lead side = the shoulder nearer the opponent just before the punch
-    let lead = 0, n = 0;
-    for (const f of series[k]) {
-      if (f.t < t - 0.6 || f.t > t - 0.1) continue;
-      lead += (pt(f.p, 11)[0] - pt(f.p, 12)[0]) * dir; n++;
-    }
-    if (!n) { const f = nearest(k, t); if (f) lead = (pt(f.p, 11)[0] - pt(f.p, 12)[0]) * dir; }
-    const leadSide = lead >= 0 ? 'left' : 'right';
-    const role = hand === leadSide ? 'lead' : 'rear';
+    const role = roleAt(k, hand, t);
     let shape;
     if (up > 0.3 && up > Math.abs(toward) * 0.8) shape = 'uppercut';
     else if (elbow >= 140 && toward > 0.15) shape = 'straight';
@@ -719,12 +749,15 @@ function applyModel(m, p) {
   const near = m.ex.filter((e) => e.f.length === p.feat.length).map((e) => [fdist(e.f, p.feat), e.l])
     .filter(([d]) => d <= 1.5 * scale).sort((a, b) => a[0] - b[0]).slice(0, 5);
   if (!near.length) return true;
-  const votes = { [p.label]: 1 / (0.7 * scale + 0.05) }; let total = votes[p.label];
-  for (const [d, l] of near) { const w = 1 / (d + 0.05); votes[l] = (votes[l] || 0) + w; total += w; }
+  // votes are for the shape (or "not a punch"): lead or rear always comes from the stance
+  const key = (l) => (l === 'none' ? 'none' : SHAPE(l));
+  const votes = { [key(p.label)]: 1 / (0.7 * scale + 0.05) }; let total = votes[key(p.label)];
+  for (const [d, l] of near) { const w = 1 / (d + 0.05); votes[key(l)] = (votes[key(l)] || 0) + w; total += w; }
   const [best, v] = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
   if (v / total < 0.6) return true;
   if (best === 'none') return false;
-  if (best !== p.label && ROLE[best]) { p.label = best; p.role = ROLE[best]; p.learned = true; }
+  const lab = withRole(best, p.role);
+  if (lab !== p.label) { p.label = lab; p.learned = true; }
   return true;
 }
 
@@ -849,6 +882,14 @@ export function initBreakdown({ root }) {
           <label class="bd-name f1"><span><i class="dot"></i>Fighter B is</span>
             <input data-k="wn1" maxlength="24" placeholder="Type their name" autocomplete="off" aria-label="Fighter B's name"></label>
         </div>
+        <div class="bd-stances">
+          <div class="bd-stance f0"><span data-k="st0txt">Stance: reading…</span>
+            <div class="seg" role="radiogroup" aria-label="Fighter A's stance" data-k="st0">
+              <button type="button" role="radio" data-value="auto">Auto</button><button type="button" role="radio" data-value="orthodox">Orthodox</button><button type="button" role="radio" data-value="southpaw">Southpaw</button></div></div>
+          <div class="bd-stance f1"><span data-k="st1txt">Stance: reading…</span>
+            <div class="seg" role="radiogroup" aria-label="Fighter B's stance" data-k="st1">
+              <button type="button" role="radio" data-value="auto">Auto</button><button type="button" role="radio" data-value="orthodox">Orthodox</button><button type="button" role="radio" data-value="southpaw">Southpaw</button></div></div>
+        </div>
         <div class="row-btns"><button type="button" class="mini primary-mini" data-k="whook">Looks right, analyse</button>
           <button type="button" class="mini" data-k="whonext">Try a later frame</button></div>
       </div>
@@ -868,6 +909,24 @@ export function initBreakdown({ root }) {
   // this clip's corrections are remembered, so reopening the same clip keeps them
   const FIX_KEY = 'bc.clipFixes.v1';
   let clipId = null;
+  // stances you've set, remembered by fighter name ("Moses" is a southpaw on every clip)
+  const STANCE_KEY = 'bc.fighterStance.v1';
+  const knownStances = () => { try { return JSON.parse(localStorage.getItem(STANCE_KEY) || '{}'); } catch { return {}; } };
+  const rememberStance = (name, st) => {
+    if (/^Fighter [AB]$/.test(name)) return;
+    try { const all = knownStances(); all[name.toLowerCase()] = st; localStorage.setItem(STANCE_KEY, JSON.stringify(all)); } catch { /* ignore */ }
+  };
+  const setStance = (k, st) => {
+    overrides.stance = { ...(overrides.stance || {}), [k]: st };
+    rememberStance(names()[k], st);
+    saveFixes();
+  };
+  // this clip's corrections, plus remembered stances for the names typed in
+  const opts = () => {
+    const known = knownStances(), nm = names(), stance = { ...(overrides.stance || {}) };
+    for (const k of [0, 1]) if (!stance[k] && known[nm[k].toLowerCase()]) stance[k] = known[nm[k].toLowerCase()];
+    return { model: fightModel, overrides: { ...overrides, stance } };
+  };
   const loadFixes = (id) => { try { return JSON.parse(localStorage.getItem(FIX_KEY) || '{}')[id] || {}; } catch { return {}; } };
   const saveFixes = () => {
     if (!clipId) return;
@@ -875,6 +934,7 @@ export function initBreakdown({ root }) {
   };
   const names = () => [$('n0').value.trim() || 'Fighter A', $('n1').value.trim() || 'Fighter B'];
   let setup = null;   // { dets, roles, boxes } while choosing who's who
+  let setupChanged = null;   // re-reads the stances when you change who's who
 
   $('quality').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
@@ -882,6 +942,8 @@ export function initBreakdown({ root }) {
     $('quality').querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
   });
   for (const k of ['n0', 'n1']) $(k).addEventListener('input', () => { if (result) render(); });
+  // a name with a remembered stance re-reads that fighter's punches once you've finished typing
+  for (const k of ['n0', 'n1', 'wn0', 'wn1']) $(k).addEventListener('change', () => { if (result) reanalyse(); });
   // names typed in the who's-who step become the fighters' names everywhere (boxes, write-up, voice-over)
   for (const i of [0, 1]) {
     $(`wn${i}`).addEventListener('input', () => {
@@ -992,16 +1054,87 @@ export function initBreakdown({ root }) {
       for (let tt = 0.4; tt < Math.min(dur, 10) && !found; tt += 1) { const d = await detectAt(lmk, sampler, w, h, tt); if (d.dets.length) found = d; }
     }
     if (!found) { fail('Couldn\'t find anyone in the first part of this clip. Try a clip where the fighters are in shot.'); return null; }
+
+    // learn each fighter's stance first, from frames spread through the clip, so lead and rear
+    // (jab or cross, lead or rear hook) are right from the start
+    $('ptext').textContent = 'Learning each fighter\'s stance…';
+    const samples = [];
+    const span = Math.min(dur, 60), N = 12;
+    for (let i = 0; i < N; i++) {
+      const tt = 0.3 + (i + 0.5) * (span - 0.3) / N;
+      const d = await detectAt(lmk, sampler, w, h, tt);
+      if (d.dets.length >= 2) samples.push(d);
+      $('pbar').style.width = `${((i + 1) / N) * 100}%`;
+    }
+    await seekTo(found.t);
+    sampler.grab(video);
     $('progress').hidden = true;
+
+    const pick = [null, null];   // your choice; null = the stance it read
+    const known = () => knownStances();
+    const nameOf = (k) => $(`wn${k}`).value.trim().toLowerCase();
+    // match the marked fighters in each sample frame by appearance, then read their stance against each other
+    const guessStances = () => {
+      const look = ['A', 'B'].map((r) => { const i = setup.roles.indexOf(r); return i >= 0 ? setup.apps[i] : null; });
+      const votes = [[], []];
+      if (!look[0] || !look[1]) return [null, null];
+      for (const s of [setup, ...samples]) {
+        const cand = s.dets.map((p, i) => i).filter((i) => refScore(s.apps[i]) < 1.3);
+        let best = null;
+        for (const i of cand) for (const j of cand) {
+          if (i === j) continue;
+          const c = sigDist(s.apps[i], look[0]) + sigDist(s.apps[j], look[1]);
+          if (!best || c < best.c) best = { i, j, c };
+        }
+        if (!best || best.c > 1.2) continue;
+        const pa = s.dets[best.i], pb = s.dets[best.j];
+        const va = stanceVote(pa, pb), vb = stanceVote(pb, pa);
+        if (va) votes[0].push(va);
+        if (vb) votes[1].push(vb);
+      }
+      return votes.map((v) => {
+        if (v.length < 3) return null;
+        const orth = v.filter((x) => x > 0).length / v.length;
+        return { stance: orth >= 0.5 ? 'orthodox' : 'southpaw', share: Math.max(orth, 1 - orth), n: v.length };
+      });
+    };
+    let guess = [null, null];
+    const showStances = () => {
+      guess = guessStances();
+      const kn = known();
+      for (const k of [0, 1]) {
+        const g = guess[k], rem = kn[nameOf(k)];
+        $(`st${k}`).querySelectorAll('button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.value === (pick[k] || 'auto'))));
+        let txt;
+        if (pick[k]) txt = `Stance: ${pick[k]} (your call)`;
+        else if (rem) txt = `Stance: ${rem} (remembered for this name)`;
+        else if (g && g.share >= 0.75 && g.n >= 5) txt = `Stance: looks ${g.stance} (${Math.round(g.share * g.n)} of ${g.n} frames)`;
+        else if (g) txt = `Stance: probably ${g.stance}, not sure. Pick one if you know`;
+        else txt = 'Stance: will be read from the whole clip';
+        $(`st${k}txt`).textContent = txt.replace('Stance:', `${$(`wn${k}`).value.trim() || `Fighter ${'AB'[k]}`}'s stance:`);
+      }
+    };
+    for (const k of [0, 1]) {
+      $(`st${k}`).onclick = (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        pick[k] = b.dataset.value === 'auto' ? null : b.dataset.value;
+        showStances();
+      };
+      $(`wn${k}`).oninput = () => showStances();   // a remembered name fills its stance in
+    }
+
     return new Promise((resolve) => {
       const show = (f) => {
         setup = { ...f, roles: Tracker.guess(f.dets, f.apps) };
         // prefill with names already typed (but not the "Fighter A" defaults)
         for (const i of [0, 1]) { const v = $(`n${i}`).value.trim(); $(`wn${i}`).value = /^Fighter [AB]$/.test(v) ? '' : v; }
+        for (const k of [0, 1]) pick[k] = overrides.stance?.[k] || null;
         $('who').hidden = false;
         overlay.classList.add('picking');
         drawSetup();
+        showStances();
       };
+      setupChanged = showStances;
       show(found);
       $('whook').onclick = () => {
         // one fighter is enough: the other is picked up as soon as they come into shot
@@ -1010,6 +1143,14 @@ export function initBreakdown({ root }) {
           return;
         }
         $('status').textContent = ''; $('status').classList.remove('error');
+        // lock in the stances: yours, a remembered one, or a confident read
+        const kn = known();
+        for (const k of [0, 1]) {
+          const g = guess[k];
+          const st = pick[k] || kn[nameOf(k)] || (g && g.share >= 0.75 && g.n >= 5 ? g.stance : null);
+          if (st) setStance(k, st);
+        }
+        setupChanged = null;
         const s = setup; setup = null;
         $('who').hidden = true; overlay.classList.remove('picking');
         resolve(s);
@@ -1068,6 +1209,7 @@ export function initBreakdown({ root }) {
     if (next) setup.roles = setup.roles.map((x) => (x === next ? null : x));   // each role belongs to one person
     setup.roles[i] = next;
     drawSetup();
+    setupChanged?.();
   });
 
   function drawSkeleton(p, col, sc, ox, oy, alpha = 1) {
@@ -1105,7 +1247,7 @@ export function initBreakdown({ root }) {
       try { frames = smoothIdentities(rawFrames, liveTracker.tracks.map((tr) => tr.bank)); } catch (e) { console.error(e); }
     }
     $('progress').hidden = true;
-    result = analyse(frames, { model: fightModel });
+    result = analyse(frames, opts());
     const secs = Math.max(1, (frames.length ? frames[frames.length - 1].t : video.currentTime) || video.duration || 1);
     if (frames.length < secs * 3) {
       $('status').textContent = 'Only part of the clip could be read (the app was probably in the background). Keep it open on screen and try again.';
@@ -1332,7 +1474,23 @@ export function initBreakdown({ root }) {
         const v = document.createElement('span'); v.className = 'bn'; v.textContent = s.by[l];
         row.append(n, b, v); mix.append(row);
       }
-      c.append(h, st, mix);
+      // stance: decides lead or rear for every punch this fighter throws
+      const sr = document.createElement('div'); sr.className = 'bd-stance-row';
+      const cur = res.stance?.[k];
+      sr.append(Object.assign(document.createElement('span'), { textContent: cur?.set ? 'Stance' : 'Stance (read)' }));
+      for (const v of ['orthodox', 'southpaw']) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'mini';
+        b.textContent = v === 'orthodox' ? 'Orthodox' : 'Southpaw';
+        b.setAttribute('aria-pressed', String(cur?.name === v));
+        b.addEventListener('click', () => {
+          if (cur?.name === v && cur.set) return;
+          setStance(k, v); reanalyse();
+          $('status').textContent = `${nm[k]} set to ${v}: every punch re-read${/^Fighter [AB]$/.test(nm[k]) ? '' : `, and remembered for ${nm[k]}`}.`;
+          $('status').classList.remove('error');
+        });
+        sr.append(b);
+      }
+      c.append(h, st, sr, mix);
       grid.append(c);
     });
     R.append(grid);
@@ -1401,10 +1559,25 @@ export function initBreakdown({ root }) {
 
     // missed a knockdown? pause on it and mark it
     const mk = document.createElement('div'); mk.className = 'card bd-mark';
-    mk.innerHTML = `<p class="card-title">Missed a knockdown?</p>
-      <p class="sheet-note">Pause the video where the fighter starts to go down, then tap who went down. It's saved for this clip,
-      and that exchange is scored as won by the other fighter.</p>
+    mk.innerHTML = `<p class="card-title">Missed something?</p>
+      <p class="sheet-note">Pause the video on the moment, then add it. Saved for this clip.</p>
+      <p class="bd-mark-sub">A punch it didn't see</p>
+      <div class="bd-addp">
+        <select data-m="pf" aria-label="Who threw it"></select>
+        <select data-m="pl" aria-label="Which punch"></select>
+        <select data-m="po" aria-label="Did it land"><option value="landed">✓ Landed</option><option value="blocked">⊘ Blocked</option><option value="missed">✗ Missed</option></select>
+        <button type="button" class="mini primary-mini" data-m="padd">Add punch here</button></div>
+      <p class="bd-mark-sub">A knockdown: tap who went down (pause where they start to fall)</p>
       <div class="row-btns"><button type="button" class="mini f0" data-m="0"></button><button type="button" class="mini f1" data-m="1"></button></div>`;
+    const M = (k) => mk.querySelector(`[data-m="${k}"]`);
+    nm.forEach((n, k) => M('pf').append(new Option(n, String(k))));
+    for (const l of Object.keys(NAMES)) M('pl').append(new Option(NAMES[l], l));
+    M('padd').addEventListener('click', () => {
+      const t = video.currentTime, f = Number(M('pf').value), label = M('pl').value;
+      overrides.add = [...(overrides.add || []).filter((m) => !(m.f === f && Math.abs(m.t - t) < 0.25)), { f, t, label, outcome: M('po').value }];
+      saveFixes(); reanalyse();
+      $('status').textContent = `Added ${nm[f]}'s ${NAMES[label].toLowerCase()} at ${fmt(t)}.`; $('status').classList.remove('error');
+    });
     for (const k of [0, 1]) {
       const b = mk.querySelector(`[data-m="${k}"]`);
       b.textContent = `${nm[k]} down here`;
@@ -1477,10 +1650,24 @@ export function initBreakdown({ root }) {
     }
     X('outcome').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { outcome = b.dataset.value; sync(); } });
     const commit = (none) => {
-      if (p.feat) { fightModel.ex.push({ l: none ? 'none' : label, f: p.feat }); saveFightModel(fightModel); }
-      overrides[punchKey(p)] = none ? { none: true } : { label, outcome };
+      // a lead/rear mix-up means the stance was read wrong: fix it for every punch this fighter throws
+      const flip = !none && ROLE[label] !== p.role && !p.added;
+      if (flip) {
+        const cur = result.stance?.[p.f]?.name;
+        setStance(p.f, cur === 'southpaw' ? 'orthodox' : 'southpaw');
+      }
+      if (p.feat) {
+        // the model learns the shape; its lead/rear flag follows the corrected stance
+        const f = p.feat.slice(); if (flip) f[f.length - 1] = ROLE[label] === 'lead' ? 1 : 0;
+        fightModel.ex.push({ l: none ? 'none' : label, f }); saveFightModel(fightModel);
+      }
+      if (none && p.added) overrides.add = (overrides.add || []).filter((m) => !(m.f === p.f && Math.abs(m.t - p.t) < 0.05));
+      else overrides[punchKey(p)] = none ? { none: true } : { label, outcome };
       saveFixes(); reanalyse();
-      $('status').textContent = none ? 'Removed, and the model will learn it wasn\'t a punch.' : 'Saved. The model learns from every correction.';
+      const nm = names()[p.f];
+      $('status').textContent = none ? 'Removed, and the model will learn it wasn\'t a punch.'
+        : flip ? `Saved. That was a stance mix-up, so ${nm} is now ${result.stance?.[p.f]?.name} and all ${nm}'s punches were re-read.`
+          : 'Saved. The model learns from every correction.';
       $('status').classList.remove('error');
     };
     X('save').addEventListener('click', () => commit(false));
@@ -1491,7 +1678,7 @@ export function initBreakdown({ root }) {
 
   function reanalyse() {
     if (!frames.length) return;
-    result = analyse(frames, { model: fightModel, overrides });
+    result = analyse(frames, opts());
     render();
   }
 
@@ -1507,12 +1694,12 @@ export function initBreakdown({ root }) {
     async _testVideo(src, fs) {
       video.src = src; video.controls = true; video.muted = true;
       await new Promise((ok) => { video.onloadeddata = ok; });
-      frames = fs; overrides = {}; result = analyse(fs, { model: fightModel });
+      frames = fs; overrides = {}; result = analyse(fs, opts());
       $('player').hidden = false; $('progress').hidden = true;
       startOverlay(); render(); return result;
     },
     // Developer test hook: show the breakdown for ready-made frames (no video).
-    _test(fs) { frames = fs; overrides = {}; result = analyse(fs, { model: fightModel }); $('player').hidden = false; $('progress').hidden = true; render(); return result; },
+    _test(fs) { frames = fs; overrides = {}; result = analyse(fs, opts()); $('player').hidden = false; $('progress').hidden = true; render(); return result; },
   };
 }
 

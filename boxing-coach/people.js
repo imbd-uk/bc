@@ -148,6 +148,18 @@ function histDist(a, b) {
 
 // Someone lying (or falling) on the canvas: body far from upright. Their colour samples land on the
 // canvas and shorts, so their look and "referee score" can't be trusted, and a referee never lies down.
+// Stance in one frame, facing the opponent: +1 left side forward (orthodox), -1 right side forward
+// (southpaw), 0 can't tell. Shoulders, hips, knees and feet vote together.
+export function stanceVote(p, opp) {
+  const dir = Math.sign(center(opp)[0] - center(p)[0]) || 1;
+  let v = 0;
+  for (const [a, b] of [[11, 12], [23, 24], [25, 26], [27, 28]]) {
+    const P = pt(p, a), Q = pt(p, b);
+    if (P[2] > 0.5 && Q[2] > 0.5) v += Math.sign((P[0] - Q[0]) * dir);
+  }
+  return Math.sign(v);
+}
+
 export function lying(p) {
   const sh = mid(pt(p, 11), pt(p, 12)), hp = mid(pt(p, 23), pt(p, 24));
   return Math.atan2(Math.abs(sh[0] - hp[0]), hp[1] - sh[1]) * 180 / Math.PI > 55;

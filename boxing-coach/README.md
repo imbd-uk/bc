@@ -59,6 +59,13 @@ The app has four pages, switched with the tab bar at the bottom:
   (a quick drop in height, measured so camera tilts and zooms don't fake it), and links them to the
   punch they set up ("feints the jab, then throws a cross", "changes levels and digs to the body").
   Type each fighter's name in the who's-who step and it's used everywhere.
+  **Stance first:** before the full analysis it reads each fighter's stance (orthodox or southpaw) from
+  frames spread through the clip, using shoulders, hips, knees and feet together, and shows it in the
+  who's-who step so you can confirm or change it. Stances you set are remembered by fighter name. Lead or
+  rear (jab vs cross, lead vs rear hook) always comes from the stance; the punch network only decides the
+  shape (straight, hook, uppercut). Each fighter card has an Orthodox/Southpaw switch, and correcting a
+  jab to a cross (or any lead/rear mix-up) flips that fighter's stance and re-reads all their punches.
+  **Missed something?** Pause on the moment to add a punch it didn't see (who, which punch, landed or not).
   **Thorough** mode (default) reads the clip at ¼ speed, then a second pass re-decides who's who for
   every frame using the whole clip, so one-frame swaps and flickers are removed. Review plays at normal
   speed with skeletons gliding between analysed frames. Each punch is marked **landed / blocked /

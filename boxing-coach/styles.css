@@ -276,6 +276,18 @@ label.btn { cursor: pointer; }
 .bd-win .mini { font-size: 13px; padding: 5px 10px; }
 .bd-win .mini[aria-pressed="true"] { background: var(--fg); color: #08090a; }
 .bd-win .mini:last-child:not(.f0):not(.f1):not([aria-pressed]) { margin-left: auto; }
+.bd-stance-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; font-size: 13px; color: var(--fg-2); }
+.bd-stance-row .mini { font-size: 12px; padding: 4px 9px; }
+.bd-stance-row .mini[aria-pressed="true"] { background: var(--fg); color: #08090a; }
+.bd-stances { display: grid; gap: 8px; margin: 4px 0 10px; }
+.bd-stance { display: grid; gap: 4px; font-size: 13px; color: var(--fg-2); }
+.bd-stance.f0 > span { color: var(--f0, #7cc4ff); }
+.bd-stance.f1 > span { color: var(--f1, #ffcf5c); }
+.bd-stance .seg button { min-width: 0; font-size: 13px; padding: 6px 10px; }
+.bd-mark-sub { margin: 10px 0 6px; font-size: 13px; font-weight: 600; }
+.bd-addp { display: flex; flex-wrap: wrap; gap: 6px; }
+.bd-addp select { background: rgba(255,255,255,0.06); color: var(--fg); border: 1px solid var(--stroke); border-radius: 10px; padding: 6px 8px; font: inherit; font-size: 13px; max-width: 100%; }
+.bd-addp select option { background: #15171a; }
 .bd-notes { margin: 0; padding-left: 18px; display: grid; gap: 5px; color: var(--fg-2); font-size: 14px; }
 .bd-notes b { font-weight: 600; }
 .bd-notes .n-counter::marker { color: var(--good); }
