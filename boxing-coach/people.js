@@ -146,6 +146,13 @@ function histDist(a, b) {
   return Math.sqrt(Math.max(0, 1 - bc));
 }
 
+// Someone lying (or falling) on the canvas: body far from upright. Their colour samples land on the
+// canvas and shorts, so their look and "referee score" can't be trusted, and a referee never lies down.
+export function lying(p) {
+  const sh = mid(pt(p, 11), pt(p, 12)), hp = mid(pt(p, 23), pt(p, 24));
+  return Math.atan2(Math.abs(sh[0] - hp[0]), hp[1] - sh[1]) * 180 / Math.PI > 55;
+}
+
 // The pose model sometimes returns the same person twice: keep the clearer copy.
 export function dedupe(dets, apps) {
   const keep = dets.map(() => true);
@@ -272,11 +279,17 @@ export class Tracker {
     const cs = dets.map(center), scores = apps.map(refScore);
     // people much smaller than the biggest in shot are in the crowd, not in the ring
     const sizes = dets.map(torso), big = Math.max(0, ...sizes);
+    const down = dets.map(lying);
     const cost = (k, i) => {
-      if (sizes[i] < 0.45 * big) return Infinity;
+      if (down[i] && k === 2) return Infinity;              // the referee never lies on the canvas
+      if (sizes[i] < 0.45 * big && !down[i]) return Infinity;
       const tr = this.tracks[k];
-      const stale = t - tr.seen > 1.0;
+      const stale = t - tr.seen > (down[i] ? 2.0 : 1.0);
       const pos = cut || !tr.pos || stale ? 0.4 : Math.min(2, d2(cs[i], tr.pos) / this.gate);
+      // a fallen fighter: colours are unreliable, so lean on where they went down instead
+      if (down[i]) return 0.3 + 0.8 * pos + 0.3 * sigDist(apps[i], tr.bank);
+      // the referee may walk into shot later: fill his slot from a clear referee look
+      if (k === 2 && !tr.bank) return scores[i] > REF_THRESHOLD ? 0.6 + 0.3 * pos : Infinity;
       const app = sigDist(apps[i], tr.bank);
       const role = k === 2 ? Math.max(0, REF_THRESHOLD + 0.2 - scores[i]) * 0.9 : Math.max(0, scores[i] - 0.6) * 1.4;
       // looking like one of the OTHER people we know is strong evidence it isn't this one
@@ -317,6 +330,7 @@ export class Tracker {
       const tr = this.tracks[k];
       const c = cost(k, i);
       tr.pos = cs[i]; tr.seen = t;
+      if (down[i]) return dets[i];                            // don't learn a look from a body lying on the canvas
       if (!tr.bank) tr.bank = [sigOf(apps[i])];
       else if (c < 0.7 && !cut) addLook(tr.bank, apps[i]);   // only learn new looks when we're sure
       return dets[i];
@@ -336,6 +350,7 @@ export function smoothIdentities(raw, banks) {
     const sizes = dets.map(torso), big = Math.max(0, ...sizes);
     const scores = apps.map(refScore);
     const cs = dets.map(center);
+    const down = dets.map(lying);
     // every way of giving (some of) the people in this frame the roles A, B, referee
     const states = [];
     const n = dets.length;
@@ -346,16 +361,25 @@ export function smoothIdentities(raw, banks) {
       for (let k = 0; k < 3; k++) {
         const i = s[k];
         if (i < 0) { c += MISS[k]; continue; }
+        if (down[i]) {
+          // someone on the canvas is a fighter, never the referee; their colours can't be trusted
+          if (k === 2 || !banks[k] || !banks[k].length) { c = Infinity; break; }
+          c += 0.4 + 0.35 * sigDist(apps[i], banks[k]);
+          continue;
+        }
         if (sizes[i] < 0.45 * big) { c = Infinity; break; }
-        // a slot nobody was ever confirmed as stays empty (e.g. the second fighter never properly in shot)
-        if (!banks[k] || !banks[k].length) { c = Infinity; break; }
+        if (!banks[k] || !banks[k].length) {
+          // the referee can be recognised from his look alone; an unseen fighter slot stays empty
+          if (k === 2 && scores[i] > REF_THRESHOLD) { c += 0.5 + Math.max(0, REF_THRESHOLD + 0.6 - scores[i]) * 0.5; continue; }
+          c = Infinity; break;
+        }
         const role = k === 2 ? Math.max(0, REF_THRESHOLD + 0.2 - scores[i]) * 0.55 : Math.max(0, scores[i] - 0.6) * 1.4;
         // the referee slot must also look like the referee seen so far (shirt, trousers), not just "not a fighter"
         c += (k === 2 ? 1.7 : 1.2) * sigDist(apps[i], banks[k]) + role;
       }
       if (c < Infinity) states.push({ s, c });
     }
-    return { t: f.t, cut: f.cut, dets, cs, sizes, states };
+    return { t: f.t, cut: f.cut, dets, cs, sizes, states, down };
   });
   // dynamic programming over the clip
   let prev = null;
@@ -371,7 +395,9 @@ export function smoothIdentities(raw, banks) {
             if (f.cut) continue;
             const L = Math.max(f.sizes[i], prev.sizes[pi]);
             const jump = d2(f.cs[i], prev.cs[pi]) / L;
-            tc += 0.9 * Math.min(2.5, Math.max(0, jump - 0.15) / 0.4);   // people don't teleport
+            // people don't teleport (but a fighter going down moves a long way, fast)
+            const slack = f.down[i] || prev.down[pi] ? 0.9 : 0.15;
+            tc += 0.9 * Math.min(2.5, Math.max(0, jump - slack) / 0.4);
           } else if ((i >= 0) !== (pi >= 0)) tc += 0.15;
         }
         const v = ps.total + tc;

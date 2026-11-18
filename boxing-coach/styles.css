@@ -272,6 +272,10 @@ label.btn { cursor: pointer; }
 .bd-notes .n-result { color: var(--fg); font-weight: 600; }
 .bd-notes .n-result::marker { color: var(--good); }
 .bd-model .row-btns label.mini { cursor: pointer; }
+.bd-win { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--fg-2); }
+.bd-win .mini { font-size: 13px; padding: 5px 10px; }
+.bd-win .mini[aria-pressed="true"] { background: var(--fg); color: #08090a; }
+.bd-win .mini:last-child:not(.f0):not(.f1):not([aria-pressed]) { margin-left: auto; }
 .bd-notes { margin: 0; padding-left: 18px; display: grid; gap: 5px; color: var(--fg-2); font-size: 14px; }
 .bd-notes b { font-weight: 600; }
 .bd-notes .n-counter::marker { color: var(--good); }

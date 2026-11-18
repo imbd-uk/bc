@@ -66,7 +66,8 @@ export function buildScript(res, frames, names, readLines = []) {
 
   // the most instructive exchanges, in time order
   const score = (ex) => ex.punches.length + 3 * ex.notes.filter((n) => n.k === 'counter').length + 2 * ex.notes.filter((n) => n.k === 'setup').length;
-  const chosen = [...res.exchanges].sort((a, b) => score(b) - score(a)).slice(0, MAX_EXCHANGES).sort((a, b) => a.start - b.start);
+  // (a knockdown where the punch couldn't be seen has no punches; it gets its own knockdown stop below)
+  const chosen = res.exchanges.filter((ex) => ex.punches.length).sort((a, b) => score(b) - score(a)).slice(0, MAX_EXCHANGES).sort((a, b) => a.start - b.start);
 
   let lastBand = null, stayedCount = 0;
   chosen.forEach((ex, n) => {
@@ -195,10 +196,11 @@ export function buildScript(res, frames, names, readLines = []) {
 
   // knockdowns always get their own stop
   for (const kd of res.knockdowns || []) {
-    const c = kd.cause;
+    const c = kd.cause, h = kd.hiddenHand;
     beats.push({
       t: Math.min(tEnd, kd.t + 0.4), kind: 'knockdown', label: 'Knockdown',
-      text: `Knockdown! ${N(kd.f)} goes down${c ? `, and it's the ${lowerName(c.label)}${c.target === 'body' ? ' to the body' : ''} from ${N(1 - kd.f)} that does it` : ''}.`,
+      text: `Knockdown! ${N(kd.f)} goes down${c ? `, and it's the ${lowerName(c.label)}${c.target === 'body' ? ' to the body' : ''} from ${N(1 - kd.f)} that does it`
+        : h ? `. ${N(1 - kd.f)} lands the ${h.role} hand, and it's so quick the camera barely sees it` : `. ${N(1 - kd.f)} wins that one outright`}.`,
       marks: [{ type: 'spot', f: kd.f }, { type: 'tag', f: kd.f, text: 'KNOCKDOWN' }],
     });
   }

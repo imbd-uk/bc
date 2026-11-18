@@ -65,7 +65,11 @@ The app has four pages, switched with the tab bar at the bottom:
   missed** (glove on head/body, the head snapping back, or meeting the guard) and each exchange gets a
   **winner**. **Tap any punch to correct it** (type, outcome, or not a punch): corrections are saved as
   a **fight model** in the browser and, after 8, are applied to every new clip. The model can be
-  exported and imported as a JSON file. It tracks both fighters,
+  exported and imported as a JSON file. Each exchange also has a **Winner** row (tap a fighter or Even
+  to overrule the scoring) and knockdowns have **Not a knockdown**; if it misses one, pause on the fall
+  and tap **"(name) down here"**. These fixes are remembered for that clip. A knockdown always gets its
+  own exchange, won by the other fighter, and lasts as long as the fighter is down or out of sight, even
+  when the punch that caused it is too fast or hidden to see (it then names the hand that moved). It tracks both fighters,
   calls each punch (type, lead/rear, head/body), splits the clip into exchanges and writes up
   who led, the setups (jab into the cross, double jab, body-to-head…), the counters and who had
   the last word, plus each fighter's output, punch mix and go-to combination. Tap an

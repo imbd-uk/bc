@@ -35,14 +35,14 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   const series = [0, 1].map((k) => frames.filter((f) => f.poses[k]).map((f) => ({ t: f.t, p: f.poses[k] })));
   const headMotion = [null, null];
   const refSeries = frames.filter((f) => f.ref).map((f) => ({ t: f.t, p: f.ref }));
-  const nearest = (k, t) => {
+  const nearest = (k, t, win = 0.25) => {
     const s = series[k];
     if (!s.length) return null;
     let lo = 0, hi = s.length - 1;
     while (lo < hi) { const m = (lo + hi) >> 1; if (s[m].t < t) lo = m + 1; else hi = m; }
     const c = s[lo], b = s[lo - 1];
     const best = b && Math.abs(b.t - t) < Math.abs(c.t - t) ? b : c;
-    return Math.abs(best.t - t) < 0.25 ? best : null;
+    return Math.abs(best.t - t) < win ? best : null;
   };
   const xAt = (k, t) => { const f = nearest(k, t); return f ? center(f.p)[0] : null; };
   // +1 when the opponent is to the right
@@ -54,6 +54,19 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     const v = series[k].map((f) => torso(f.p)).sort((a, b) => a - b);
     return v.length ? v[v.length >> 1] : 100;
   });
+  // A knockdown lasts while the fighter is lying there or out of sight (the pose model often loses them on
+  // the canvas). It ends once they're seen back on their feet for a few frames: one stray frame isn't enough.
+  const downUntil = (k, from) => {
+    let tEnd = from, up = 0;
+    for (const f of frames) {
+      if (f.t <= from) continue;
+      if (f.t > from + 15) break;
+      if (f.poses[k] && !isDown(f.poses[k], torsoAvg[k])) { if (++up >= 4) break; continue; }
+      if (f.poses[k]) up = 0;
+      tEnd = f.t;
+    }
+    return tEnd;
+  };
   // How far fighter k moved towards the opponent between t0 and t1 (torso lengths).
   const advance = (k, t0, t1) => {
     const a = xAt(k, t0), b = xAt(k, t1);
@@ -61,7 +74,14 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     return ((b - a) * dirAt(k, t0)) / torsoAvg[k];
   };
 
-  const knockdowns = findKnockdowns();
+  let knockdowns = findKnockdowns();
+  // knockdowns you marked or removed by hand win over the detector
+  if (overrides?.kdOff) knockdowns = knockdowns.filter((kd) => !overrides.kdOff.some((t) => Math.abs(t - kd.t) < 1));
+  for (const m of overrides?.kdAdd || []) {
+    if (knockdowns.some((kd) => Math.abs(kd.t - m.t) < 1)) continue;
+    knockdowns.push({ f: m.f, t: m.t, tEnd: Math.max(m.t + 1, downUntil(m.f, m.t + 0.5)), marked: true });
+  }
+  knockdowns.sort((a, b) => a.t - b.t);
   const refIn = findRefIn();
   // no punches are counted while a fighter is down and being counted, or while the referee is between them
   const quiet = [...knockdowns.map((kd) => [kd.t, kd.tEnd + A.COUNT_PAUSE]), ...refIn.map((r) => [r.t, r.tEnd])];
@@ -119,7 +139,30 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
   for (const kd of knockdowns) {
     kd.cause = [...punches].reverse().find((p) => p.f === 1 - kd.f && p.t <= kd.t + 0.1 && kd.t - p.t <= 2.5) || null;
     kd.ex = exchanges.find((e) => kd.t >= e.start - 0.2 && kd.t <= e.end + 2.5) || null;
-    if (kd.ex) {
+    if (!kd.cause) {
+      // the punch wasn't clear enough to count (blurred or hidden glove): take the opponent's fastest hand just before the fall
+      const o = 1 - kd.f, s = series[o];
+      let best = null;
+      for (let i = 1; i < s.length; i++) {
+        const a = s[i - 1], b = s[i], dt = b.t - a.t;
+        if (b.t < kd.t - 1.2 || b.t > kd.t + 0.15 || dt <= 0 || dt > 0.25) continue;
+        for (const [hand, j] of [['left', 15], ['right', 16]]) {
+          const v = d2(pt(a.p, j), pt(b.p, j)) / dt / torsoAvg[o];
+          if (!best || v > best.v) best = { v, hand, t: b.t };
+        }
+      }
+      if (best && best.v > 6) kd.hiddenHand = { hand: best.hand, role: roleAt(o, best.hand, best.t), t: best.t };
+    }
+    if (!kd.ex) {
+      // a knockdown always gets its own entry, even when the punch that caused it wasn't visible
+      kd.ex = { start: Math.max(0, kd.t - 1.5), end: kd.tEnd, punches: [], runs: [], init: 1 - kd.f, count: [0, 0], notes: [] };
+      const h = kd.hiddenHand;
+      kd.ex.notes.push({ k: 'lead', text: h ? `{${1 - kd.f}} lands a ${h.role} hand that the camera barely catches` : `{${1 - kd.f}} lands the shot that does it, but the punch is hidden from this camera angle` });
+      exchanges.push(kd.ex);
+      exchanges.sort((a, b) => a.start - b.start);
+      exchanges.forEach((ex, i) => { ex.n = i + 1; });
+    }
+    {
       // falling over isn't "giving ground"
       kd.ex.notes = kd.ex.notes.filter((n) => !(n.k === 'end' && n.text.startsWith(`{${kd.f}}`)));
       kd.ex.notes.push({ k: 'knockdown', text: `{${kd.f}} goes down${kd.cause ? ` from ${pName(kd.cause)}` : ''}. Knockdown!` });
@@ -139,6 +182,14 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
     const score = [0, 1].map((k) => ex.punches.filter((p) => p.f === k && p.outcome === 'landed').reduce((s, p) => s + wt(p), 0));
     ex.landed = [0, 1].map((k) => ex.punches.filter((p) => p.f === k && p.outcome === 'landed').length);
     ex.winner = ex.knockdown ? 1 - ex.knockdown.f : Math.abs(score[0] - score[1]) < 0.5 ? null : score[0] > score[1] ? 0 : 1;
+    // the winner you picked for this exchange wins over the scoring
+    const pickW = Object.entries(overrides?.win || {}).find(([t]) => Math.abs(Number(t) - ex.start) < 0.6);
+    if (pickW) {
+      ex.winner = pickW[1] === 'even' ? null : Number(pickW[1]);
+      ex.winnerFixed = true;
+      ex.notes.push({ k: 'result', text: ex.winner == null ? 'An even exchange (your call)' : `{${ex.winner}} wins the exchange (your call)` });
+      continue;
+    }
     const w = ex.winner;
     ex.notes.push({
       k: 'result',
@@ -180,7 +231,33 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
         if (g.end - g.start < A.DOWN_MIN) continue;
         // must have been on their feet just before, so a clip starting mid-count isn't a new knockdown
         if (!flags.some((x) => !x.d && x.t < g.start && x.t >= g.start - 2)) continue;
-        out.push({ f: k, t: g.start, tEnd: g.end });
+        // they stay down for as long as they're lying there or out of sight (the pose model often loses them)
+        out.push({ f: k, t: g.start, tEnd: downUntil(k, g.end) });
+      }
+
+      // The pose model often loses a fighter who is lying on the canvas. So also count: a fast fall
+      // (the body drops well over half its height in under 0.7 s, no camera cut), then the fighter is
+      // lying down or barely seen for the next 1.5 s while the opponent is still there.
+      const L = torsoAvg[k];
+      const cutAt = (t0, t1) => frames.some((f) => f.cut && f.t >= t0 && f.t <= t1);
+      for (let i = 0; i < s.length; i++) {
+        const a = s[i], ya = center(a.p)[1];
+        if (isDown(a.p, L) || out.some((kd) => a.t >= kd.t - 1 && a.t <= kd.tEnd + 2)) continue;
+        let fallEnd = null;
+        for (let j = i + 1; j < s.length && s[j].t - a.t <= 0.7; j++) {
+          if (center(s[j].p)[1] - ya >= 0.55 * L || isDown(s[j].p, L)) { fallEnd = s[j]; break; }
+        }
+        if (!fallEnd || cutAt(a.t - 0.1, fallEnd.t + 0.3)) continue;
+        const after = frames.filter((f) => f.t > fallEnd.t && f.t <= fallEnd.t + 1.5);
+        if (after.length < 10) continue;
+        const seenUp = after.filter((f) => f.poses[k] && !isDown(f.poses[k], L)).length / after.length;
+        const oppSeen = after.filter((f) => f.poses[1 - k]).length / after.length;
+        if (seenUp > 0.25 || oppSeen < 0.5) continue;
+        // how long they stay down (or out of sight)
+        const tEnd = Math.max(fallEnd.t + 1.5, downUntil(k, fallEnd.t + 1.5));
+        out.push({ f: k, t: a.t, tEnd, inferred: true });
+        i = s.findIndex((x) => x.t > tEnd);
+        if (i < 0) break;
       }
     }
     return out.sort((a, b) => a.t - b.t);
@@ -197,7 +274,11 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
       const L = (torso(a.p) + torso(b.p)) / 2;
       const between = cr[0] > Math.min(ca[0], cb[0]) + 0.2 * L && cr[0] < Math.max(ca[0], cb[0]) - 0.2 * L;
       const close = Math.min(d2(cr, ca), d2(cr, cb)) < 1.6 * L;
-      if (!(between && close)) continue;
+      // and at the same depth as them: a referee standing further back only looks "between" on screen
+      // (he'd look smaller and stand higher up the picture)
+      const hipY = (k) => mid(pt(k.p, 23), pt(k.p, 24))[1];
+      const sameDepth = torso(r.p) > 0.75 * L && Math.abs(hipY(r) - (hipY(a) + hipY(b)) / 2) < 0.6 * L;
+      if (!(between && close && sameDepth)) continue;
       if (seg && r.t - seg.tEnd <= 0.3) seg.tEnd = r.t;
       else { if (seg) segs.push(seg); seg = { t: r.t, tEnd: r.t }; }
     }
@@ -255,8 +336,9 @@ export function analyse(frames, { model = null, overrides = null, net = punchNet
         // a real punch travels a fair way...
         const travel = Math.hypot(far.r[sd].rel[0] - start.r[sd].rel[0], far.r[sd].rel[1] - start.r[sd].rel[1]);
         if (travel < A.MIN_TRAVEL) continue;
-        // ...towards an opponent who is actually there (gestures, guard shuffles and the referee's arms don't)
-        const opp0 = nearest(1 - k, start.t), opp1 = nearest(1 - k, far.t);
+        // ...towards an opponent who is actually there (gestures, guard shuffles and the referee's arms don't).
+        // The pose model can lose the opponent for a few frames as a big shot lands, so allow half a second.
+        const opp0 = nearest(1 - k, start.t, 0.5), opp1 = nearest(1 - k, far.t, 0.5);
         if (!opp0 || !opp1) continue;
         const aim = (op) => { const hd = pt(op.p, 0); return hd[2] > 0.3 ? hd : center(op.p); };
         const approach = (d2(pt(start.p, wMi), aim(opp0)) - d2(pt(far.p, wMi), aim(opp1))) / torso(far.p);
@@ -783,6 +865,14 @@ export function initBreakdown({ root }) {
   let rawFrames = [], liveTracker = null;   // everything seen, for the second pass
   let fightModel = loadFightModel(), overrides = {};   // learned corrections; this clip's corrections
   const OUTCOME_ICON = { landed: '✓', blocked: '⊘', missed: '✗' };
+  // this clip's corrections are remembered, so reopening the same clip keeps them
+  const FIX_KEY = 'bc.clipFixes.v1';
+  let clipId = null;
+  const loadFixes = (id) => { try { return JSON.parse(localStorage.getItem(FIX_KEY) || '{}')[id] || {}; } catch { return {}; } };
+  const saveFixes = () => {
+    if (!clipId) return;
+    try { const all = JSON.parse(localStorage.getItem(FIX_KEY) || '{}'); all[clipId] = overrides; localStorage.setItem(FIX_KEY, JSON.stringify(all)); } catch { /* storage full or blocked */ }
+  };
   const names = () => [$('n0').value.trim() || 'Fighter A', $('n1').value.trim() || 'Fighter B'];
   let setup = null;   // { dets, roles, boxes } while choosing who's who
 
@@ -817,7 +907,8 @@ export function initBreakdown({ root }) {
     video.src = url; video.controls = false; video.muted = true;
     try { await new Promise((ok, bad) => { video.onloadeddata = ok; video.onerror = bad; }); }
     catch { fail('That video could not be opened on this device.'); return; }
-    frames = []; result = null; rawFrames = []; overrides = {};
+    frames = []; result = null; rawFrames = [];
+    clipId = `${file.name}|${file.size}`; overrides = loadFixes(clipId);
     const tracker = new Tracker(video.videoWidth);
     liveTracker = tracker;
     const sampler = new Sampler();
@@ -1276,12 +1367,56 @@ export function initBreakdown({ root }) {
         const li = document.createElement('li'); li.className = `n-${n.k}`;
         li.append(fill(n.text, nm)); notes.append(li);
       }
-      c.append(top, seq, fixBox, notes);
+      // who won it? tap to set it yourself
+      const win = document.createElement('div'); win.className = 'bd-win';
+      win.append(Object.assign(document.createElement('span'), { textContent: 'Winner:' }));
+      for (const [v, text] of [[0, nm[0]], ['even', 'Even'], [1, nm[1]]]) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = `mini${v === 'even' ? '' : ` f${v}`}`; b.textContent = text;
+        b.setAttribute('aria-pressed', String(v === 'even' ? ex.winner == null : ex.winner === v));
+        b.addEventListener('click', () => {
+          overrides.win = Object.fromEntries(Object.entries(overrides.win || {}).filter(([t]) => Math.abs(Number(t) - ex.start) >= 0.6));
+          overrides.win[ex.start.toFixed(2)] = v;
+          saveFixes(); reanalyse();
+          $('status').textContent = 'Winner saved for this clip.'; $('status').classList.remove('error');
+        });
+        win.append(b);
+      }
+      if (ex.knockdown) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'mini'; b.textContent = 'Not a knockdown';
+        b.addEventListener('click', () => {
+          const kd = ex.knockdown;
+          if (kd.marked) overrides.kdAdd = (overrides.kdAdd || []).filter((m) => Math.abs(m.t - kd.t) >= 1);
+          else overrides.kdOff = [...(overrides.kdOff || []), kd.t];
+          saveFixes(); reanalyse();
+          $('status').textContent = 'Knockdown removed for this clip.'; $('status').classList.remove('error');
+        });
+        win.append(b);
+      }
+      c.append(top, seq, fixBox, notes, win);
       R.append(c);
     }
     const legend = document.createElement('p'); legend.className = 'hint-text';
-    legend.textContent = '✓ landed · ⊘ blocked · ✗ missed · ↓ to the body. Tap any punch to correct it: every correction teaches the fight model.';
+    legend.textContent = '✓ landed · ⊘ blocked · ✗ missed · ↓ to the body. Tap any punch to correct it: every correction teaches the fight model. Tap a winner to overrule the scoring.';
     R.append(legend);
+
+    // missed a knockdown? pause on it and mark it
+    const mk = document.createElement('div'); mk.className = 'card bd-mark';
+    mk.innerHTML = `<p class="card-title">Missed a knockdown?</p>
+      <p class="sheet-note">Pause the video where the fighter starts to go down, then tap who went down. It's saved for this clip,
+      and that exchange is scored as won by the other fighter.</p>
+      <div class="row-btns"><button type="button" class="mini f0" data-m="0"></button><button type="button" class="mini f1" data-m="1"></button></div>`;
+    for (const k of [0, 1]) {
+      const b = mk.querySelector(`[data-m="${k}"]`);
+      b.textContent = `${nm[k]} down here`;
+      b.addEventListener('click', () => {
+        const t = video.currentTime;
+        overrides.kdOff = (overrides.kdOff || []).filter((x) => Math.abs(x - t) >= 1);
+        overrides.kdAdd = [...(overrides.kdAdd || []).filter((m) => Math.abs(m.t - t) >= 1), { f: k, t }];
+        saveFixes(); reanalyse();
+        $('status').textContent = `Knockdown marked at ${fmt(t)}.`; $('status').classList.remove('error');
+      });
+    }
+    R.append(mk);
 
     // the fight model trained from your corrections
     const fm = document.createElement('div'); fm.className = 'card bd-model';
@@ -1344,7 +1479,7 @@ export function initBreakdown({ root }) {
     const commit = (none) => {
       if (p.feat) { fightModel.ex.push({ l: none ? 'none' : label, f: p.feat }); saveFightModel(fightModel); }
       overrides[punchKey(p)] = none ? { none: true } : { label, outcome };
-      reanalyse();
+      saveFixes(); reanalyse();
       $('status').textContent = none ? 'Removed, and the model will learn it wasn\'t a punch.' : 'Saved. The model learns from every correction.';
       $('status').classList.remove('error');
     };
