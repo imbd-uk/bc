@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Boxing Coach</title>
+<meta name="description" content="Shadow boxing coach that calls your punches in real time. Runs entirely on your phone.">
+<meta name="theme-color" content="#0f1420">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Boxing Coach">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Live view: camera + skeleton overlay + HUD -->
+<main id="stage" hidden>
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+
+  <header class="hud-top">
+    <div class="clock">
+      <span id="round-label" class="label">Session</span>
+      <span id="clock" class="big num">00:00</span>
+    </div>
+    <div class="counts">
+      <div><span id="punch-count" class="big num">0</span><span class="label">Punches</span></div>
+      <div><span id="combo-count" class="big num">0</span><span class="label">Combo</span></div>
+    </div>
+  </header>
+
+  <div id="stance" class="chip">Stance: finding you…</div>
+  <div id="callout" class="callout" aria-live="polite"></div>
+  <div id="hint" class="hint">Step back until your hips and both hands are in shot</div>
+
+  <footer class="hud-bottom">
+    <ol id="recent" class="recent" aria-label="Recent punches"></ol>
+    <div class="controls">
+      <button id="btn-voice" class="ctl" type="button" aria-pressed="true">Voice on</button>
+      <button id="btn-flip" class="ctl" type="button">Flip camera</button>
+      <button id="btn-end" class="ctl end" type="button">End</button>
+    </div>
+  </footer>
+</main>
+
+<!-- Start screen -->
+<section id="start" class="sheet">
+  <div class="ropes" aria-hidden="true"><i></i><i></i><i></i></div>
+  <div class="sheet-inner">
+    <h1>Boxing Coach</h1>
+    <p class="lede">Shadow box in front of your phone. It spots each punch, calls it out and counts your combos.</p>
+    <ul class="punches" aria-label="Punches it recognises">
+      <li>Jab</li><li>Cross</li><li>Hook</li><li>Uppercut</li>
+    </ul>
+
+    <div class="opts">
+      <label for="opt-camera">Camera</label>
+      <select id="opt-camera">
+        <option value="user">Front (see yourself)</option>
+        <option value="environment">Back (better quality)</option>
+      </select>
+      <label for="opt-round">Rounds</label>
+      <select id="opt-round">
+        <option value="0">No timer</option>
+        <option value="120">2 min rounds, 1 min rest</option>
+        <option value="180" selected>3 min rounds, 1 min rest</option>
+      </select>
+      <label for="opt-voice">Voice calls</label>
+      <select id="opt-voice">
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </select>
+    </div>
+
+    <button id="btn-start" class="primary" type="button" disabled>Loading coach…</button>
+    <label class="secondary" for="file-input">Analyse a recorded video</label>
+    <input id="file-input" type="file" accept="video/*" hidden>
+
+    <p id="status" class="status" role="status"></p>
+
+    <details class="tips">
+      <summary>Setting up</summary>
+      <ul>
+        <li>Prop the phone at chest height, 2–3 m away.</li>
+        <li>Your shoulders, elbows, hands and hips all need to be in shot.</li>
+        <li>Face the camera or stand slightly side-on. Good light helps a lot.</li>
+        <li>Snap each punch out and back. Slow pushes are ignored.</li>
+      </ul>
+    </details>
+
+    <p class="privacy"><strong>Private by design.</strong> Your camera feed is processed on this phone and never uploaded or saved.</p>
+  </div>
+</section>
+
+<!-- Summary after a session -->
+<section id="summary" class="sheet" hidden>
+  <div class="ropes" aria-hidden="true"><i></i><i></i><i></i></div>
+  <div class="sheet-inner">
+    <h2>Session done</h2>
+    <div class="totals">
+      <div><span id="sum-total" class="big num">0</span><span class="label">Punches</span></div>
+      <div><span id="sum-time" class="big num">0:00</span><span class="label">Time</span></div>
+      <div><span id="sum-best" class="big num">0</span><span class="label">Best combo</span></div>
+      <div><span id="sum-ppm" class="big num">0</span><span class="label">Per minute</span></div>
+    </div>
+    <div id="sum-bars" class="bars"></div>
+    <button id="btn-again" class="primary" type="button">Train again</button>
+  </div>
+</section>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
